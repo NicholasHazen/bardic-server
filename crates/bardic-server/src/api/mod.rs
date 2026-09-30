@@ -1,5 +1,6 @@
 //! HTTP handlers, grouped as the contract's tags.
 
+pub mod audio;
 pub mod audiobooks;
 pub mod audit;
 pub mod books;

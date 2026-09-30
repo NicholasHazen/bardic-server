@@ -206,3 +206,210 @@ pub async fn fetch_catalog(base_url: &str, api_key: Option<&str>) -> Catalog {
         voices,
     }
 }
+
+// ---------------------------------------------------------------- speaking
+
+pub const MODEL: &str = "breeze-tts-2";
+const DEFAULT_SEED: i64 = 42;
+/// One request's audio is bounded; 24 kHz 16-bit mono is 48 kB a second.
+const MAX_PCM_BYTES: usize = 200 * 1024 * 1024;
+
+#[derive(Debug, PartialEq)]
+pub enum SpeakError {
+    Unreachable,
+    KeyRejected,
+    /// The voice is no longer on the server.
+    VoiceGone,
+    /// The voice sounds different from when the audiobook was made.
+    VoiceChanged,
+    /// Busy or loading: nothing was made; try again after this many seconds.
+    Busy(u64),
+    /// The server refused this text; carries its fixed error code only.
+    Refused(String),
+    Failed(String),
+}
+
+pub struct Speech {
+    pub pcm: Vec<u8>,
+    pub segments: Vec<crate::audio::Segment>,
+}
+
+fn keyed(rb: reqwest::RequestBuilder, key: Option<&str>) -> reqwest::RequestBuilder {
+    match key.filter(|k| !k.is_empty()) {
+        Some(k) => rb.bearer_auth(k),
+        None => rb,
+    }
+}
+
+/// The voice as the server has it now: its revision and seed. Checked right
+/// before speaking, so audio is never made with a voice that changed.
+pub async fn live_voice(
+    base_url: &str,
+    key: Option<&str>,
+    voice: &str,
+) -> Result<(String, i64), SpeakError> {
+    let http = client();
+    let r = keyed(http.get(format!("{base_url}/v1/voices/{voice}")), key)
+        .send()
+        .await
+        .map_err(|_| SpeakError::Unreachable)?;
+    match r.status() {
+        StatusCode::NOT_FOUND => return Err(SpeakError::VoiceGone),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(SpeakError::KeyRejected),
+        s if !s.is_success() => return Err(SpeakError::Unreachable),
+        _ => {}
+    }
+    let v: Value = r
+        .json()
+        .await
+        .map_err(|_| SpeakError::Failed("The voice record was unreadable.".into()))?;
+    if v.get("kind").and_then(Value::as_str) != Some("cloned") {
+        return Err(SpeakError::VoiceChanged);
+    }
+    let reference = keyed(
+        http.get(format!("{base_url}/v1/voices/{voice}/reference")),
+        key,
+    )
+    .send()
+    .await
+    .map_err(|_| SpeakError::Unreachable)?;
+    if !reference.status().is_success() {
+        return Err(SpeakError::VoiceChanged);
+    }
+    let sha = hex(Sha256::digest(
+        &reference
+            .bytes()
+            .await
+            .map_err(|_| SpeakError::Unreachable)?,
+    )
+    .as_slice());
+    let seed = v
+        .get("settings")
+        .and_then(|s| s.get("seed"))
+        .and_then(Value::as_i64)
+        .unwrap_or(DEFAULT_SEED);
+    Ok((revision(&v, &sha), seed))
+}
+
+/// Speak `text` (one request). Streams, so dropping this future closes the
+/// connection, which stops the server's work. Free.
+pub async fn speak(
+    base_url: &str,
+    key: Option<&str>,
+    voice: &str,
+    seed: i64,
+    text: &str,
+) -> Result<Speech, SpeakError> {
+    use base64::Engine;
+    use futures_util::StreamExt;
+    let http = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(120))
+        .build()
+        .expect("http client");
+    let body = json!({
+        "model": MODEL, "input": text, "voice": voice,
+        "settings": { "seed": seed },
+        // Sent explicitly so a server default change cannot silently change the sound.
+        "segmentation": { "mode": "auto", "max_chars": 300, "sentence_pause_ms": 120, "paragraph_pause_ms": 500 },
+        "speed": 1.0, "output_format": "pcm_24000", "stream_format": "sse",
+    });
+    let resp = keyed(
+        http.post(format!("{base_url}/v1/speech/stream"))
+            .json(&body),
+        key,
+    )
+    .header("accept", "text/event-stream")
+    .send()
+    .await
+    .map_err(|_| SpeakError::Unreachable)?;
+    let status = resp.status();
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        let wait = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+        return Err(SpeakError::Busy(wait.clamp(1, 90)));
+    }
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return Err(SpeakError::KeyRejected);
+    }
+    if !status.is_success() {
+        // The server's message can echo the text; keep only its fixed code.
+        let code = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["error"]["code"].as_str().map(str::to_string));
+        let code = code
+            .filter(|c| c.len() <= 40 && c.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .unwrap_or_else(|| format!("http_{}", status.as_u16()));
+        return Err(SpeakError::Refused(code));
+    }
+    let (mut pcm, mut segments, mut done) = (Vec::<u8>::new(), Vec::new(), false);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk.map_err(|_| SpeakError::Unreachable)?);
+        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line);
+            let Some(data) = line.trim_end().strip_prefix("data:") else {
+                continue;
+            };
+            let event: Value = serde_json::from_str(data.trim())
+                .map_err(|_| SpeakError::Failed("An unreadable stream event.".into()))?;
+            match event.get("type").and_then(Value::as_str) {
+                Some("speech.audio.delta") => {
+                    let raw = base64::engine::general_purpose::STANDARD
+                        .decode(event.get("audio").and_then(Value::as_str).unwrap_or(""))
+                        .map_err(|_| SpeakError::Failed("Invalid audio data.".into()))?;
+                    pcm.extend_from_slice(&raw);
+                    if pcm.len() > MAX_PCM_BYTES {
+                        return Err(SpeakError::Failed("Too much audio for one request.".into()));
+                    }
+                }
+                Some("speech.segment") => {
+                    let s = &event["segment"];
+                    if let (Some(a), Some(b), Some(c), Some(d)) = (
+                        s["char_start"].as_i64(),
+                        s["char_end"].as_i64(),
+                        s["start_ms"].as_i64(),
+                        s["end_ms"].as_i64(),
+                    ) {
+                        segments.push(crate::audio::Segment {
+                            char_start: a,
+                            char_end: b,
+                            start_ms: c,
+                            end_ms: d,
+                        });
+                    }
+                }
+                Some("speech.audio.done") => done = true,
+                Some("error") => {
+                    let code = event["error"]["code"].as_str().unwrap_or("error");
+                    let code: String = code
+                        .chars()
+                        .filter(|c| c.is_ascii_lowercase() || *c == '_')
+                        .take(40)
+                        .collect();
+                    return Err(SpeakError::Refused(code));
+                }
+                _ => {} // unknown events are ignored, as the server's compatibility policy asks
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    if !done || pcm.is_empty() {
+        return Err(SpeakError::Failed(
+            "The stream ended before the audio was complete.".into(),
+        ));
+    }
+    Ok(Speech { pcm, segments })
+}

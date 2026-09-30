@@ -103,6 +103,22 @@ curl -s -X POST -H "$D" -H "$J" -d '{"voice_id":"<voice id>"}' $B/api/books/$BOO
 curl -s $B/api/audiobooks/<audiobook id>/chapters
 ```
 
+## Making and playing audio (M3b)
+```sh
+AB=<audiobook id>; CH=<chapter id>
+# Press play: makes the chapter and the next one (202 with a job), or 200 if it is ready
+curl -s -X POST -H "$D" -H "$L" $B/api/audiobooks/$AB/chapters/$CH/request
+# Make the whole book in the background (Idempotency-Key makes a retry safe)
+curl -s -X POST -H "$D" -H "$L" -H "$J" -H "Idempotency-Key: once" -d '{"scope":{"kind":"whole_book"}}' $B/api/audiobooks/$AB/make-ready
+curl -s $B/api/jobs/<job id>          # progress, waiting, needs_you
+curl -s -X POST -H "$D" $B/api/jobs/<job id>/pause   # or /resume, /cancel
+curl -s $B/api/audiobooks/$AB/chapters               # ready / making / not_yet per chapter
+# The audio supports Range; timings drive read-along
+curl -s -H "Range: bytes=0-99" $B/api/audio/<audio id> -o /dev/null -D -
+curl -s $B/api/audio/<audio id>/timings
+curl -s $B/api/voices/<voice id>/sample -o sample.wav
+```
+
 ## Browsers on another address
 
 ```sh

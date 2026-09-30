@@ -39,6 +39,7 @@ pub struct AppState {
     pub shutdown: Arc<watch::Sender<bool>>,
     /// Import ids whose cancellation was requested.
     pub cancelled_imports: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub jobs: Arc<crate::jobs::JobSignal>,
     ids: Arc<Mutex<ulid::Generator>>,
 }
 
@@ -80,6 +81,7 @@ impl AppState {
             config: Arc::new(config),
             shutdown: Arc::new(watch::channel(false).0),
             cancelled_imports: Arc::new(Mutex::new(Default::default())),
+            jobs: Arc::new(crate::jobs::JobSignal::new()),
             ids: Arc::new(Mutex::new(ulid::Generator::new())),
         })
     }
@@ -426,6 +428,28 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/voices", get(api::voices::list_voices))
         .route(
+            "/api/voices/{voice_id}/sample",
+            get(api::audio::voice_sample),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}/chapters/{chapter_id}/request",
+            post(api::audio::request_chapter),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}/make-ready",
+            post(api::audio::make_ready),
+        )
+        .route("/api/audio/{audio_id}", get(api::audio::get_audio))
+        .route(
+            "/api/audio/{audio_id}/timings",
+            get(api::audio::get_timings),
+        )
+        .route("/api/jobs", get(api::audio::list_jobs))
+        .route("/api/jobs/{job_id}", get(api::audio::get_job))
+        .route("/api/jobs/{job_id}/pause", post(api::audio::pause_job))
+        .route("/api/jobs/{job_id}/resume", post(api::audio::resume_job))
+        .route("/api/jobs/{job_id}/cancel", post(api::audio::cancel_job))
+        .route(
             "/api/books/{book_id}/audiobooks",
             get(api::audiobooks::list).post(api::audiobooks::create),
         )
@@ -480,6 +504,7 @@ pub struct Running {
     _lock: InstanceLock,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
+    worker: JoinHandle<()>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -499,6 +524,7 @@ pub async fn spawn(config: Config, clock: Arc<dyn Clock>) -> Result<Running, Sta
     let listener = TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
     let (tx, rx) = oneshot::channel::<()>();
+    let worker = tokio::spawn(crate::jobs::run_worker(state.clone()));
     let app = router(state.clone());
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
@@ -513,6 +539,7 @@ pub async fn spawn(config: Config, clock: Arc<dyn Clock>) -> Result<Running, Sta
         _lock: lock,
         shutdown: Some(tx),
         handle,
+        worker,
     })
 }
 
@@ -528,6 +555,12 @@ impl Running {
             .is_err()
         {
             self.handle.abort();
+        }
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.worker)
+            .await
+            .is_err()
+        {
+            self.worker.abort();
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Test support: a contract-conformance checker and an in-process test server.
 #![allow(dead_code)]
 
+pub mod breeze;
 pub mod epub;
 
 use bardic_server::{
@@ -374,6 +375,41 @@ impl TestServer {
         let done = self.wait_import(imp["id"].as_str().unwrap()).await;
         assert_eq!(done["state"], "done", "{done}");
         done["book_id"].as_str().unwrap().to_string()
+    }
+
+    /// A request whose response may not be JSON (audio). Checks the status against the
+    /// contract and returns the headers and the raw body.
+    pub async fn raw(
+        &self,
+        template: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        expect: u16,
+    ) -> (reqwest::header::HeaderMap, Vec<u8>) {
+        let mut req = self.client.get(format!("{}{}", self.base, path));
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req.send().await.expect("request sends");
+        let status = resp.status().as_u16();
+        let hdrs = resp.headers().clone();
+        let bytes = resp.bytes().await.expect("body").to_vec();
+        assert_eq!(
+            status, expect,
+            "GET {path}: expected {expect}, got {status}"
+        );
+        let json: Option<Value> = if hdrs
+            .get("content-type")
+            .is_some_and(|c| c.to_str().unwrap_or("").starts_with("application/json"))
+        {
+            serde_json::from_slice(&bytes).ok()
+        } else {
+            None
+        };
+        if let Err(e) = self.contract.check("GET", template, status, json.as_ref()) {
+            panic!("{e}");
+        }
+        (hdrs, bytes)
     }
 
     /// Create a listener and return its id.

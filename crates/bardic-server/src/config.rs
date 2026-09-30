@@ -29,6 +29,19 @@ pub struct Config {
     /// Name shown on every device. Only used the first time; later changes go through the API.
     #[arg(long, env = "BARDIC_SERVER_NAME")]
     pub server_name: Option<String>,
+
+    /// Most characters of chapter text sent to a voice server in one request.
+    #[arg(
+        long,
+        env = "BARDIC_AUDIO_CHUNK_CHARS",
+        default_value_t = 2500,
+        hide = true
+    )]
+    pub audio_chunk_chars: usize,
+
+    /// First wait, in milliseconds, before retrying an unreachable voice server (doubles each try).
+    #[arg(long, env = "BARDIC_JOB_RETRY_MS", default_value_t = 2000, hide = true)]
+    pub job_retry_ms: u64,
 }
 
 impl Config {
@@ -39,6 +52,8 @@ impl Config {
             max_upload_bytes: 31_457_280,
             allow_origins: Vec::new(),
             server_name: Some("Test Bardic".to_string()),
+            audio_chunk_chars: 2500,
+            job_retry_ms: 2000,
         }
     }
 }

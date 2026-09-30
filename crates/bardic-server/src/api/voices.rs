@@ -395,3 +395,13 @@ pub fn voice_exists(conn: &Connection, id: &str) -> Result<bool, ApiError> {
         .optional()?
         .is_some())
 }
+
+/// The daily refresh: re-read every source that is set up. Failures are recorded on the source, not raised.
+pub async fn refresh_all(state: &AppState) {
+    let cfg = state.store.run(|c| Ok(load(c, "breeze")?.config)).await;
+    if let Ok(cfg) = cfg {
+        if cfg.base_url.is_some() && check_source(state, "breeze", cfg).await.is_ok() {
+            announce(state, "breeze");
+        }
+    }
+}

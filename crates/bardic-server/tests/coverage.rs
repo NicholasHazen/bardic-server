@@ -52,6 +52,16 @@ const IMPLEMENTED: &[&str] = &[
     "createAudiobook",
     "getAudiobook",
     "listAudiobookChapters",
+    "requestChapterAudio",
+    "makeAudiobookReady",
+    "getAudio",
+    "getAudioTimings",
+    "getVoiceSample",
+    "listJobs",
+    "getJob",
+    "pauseJob",
+    "resumeJob",
+    "cancelJob",
 ];
 
 #[test]

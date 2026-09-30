@@ -2,7 +2,7 @@
 
 The server half of Bardic v2: it turns books you own into audiobooks on your own computer. It stores books and text, talks to voice sources (Breeze, Gemini, voices on this computer), makes and keeps audio, runs plans with limits, and keeps each listener's place. Clients (see the `bardic-web` repository) talk to it over the HTTP contract in this repository.
 
-**Status: M0 to M2 done; M3a (voice sources and audiobooks) done.** Implemented and tested against the contract: server, devices, audit, events, listeners and settings, the library (import EPUB and text, duplicates, sample book, series, chapters and text, cover and colour sample, search, edit, remove and restore) and places (revisions, conflicts, history, finished). Audio, voices, plans and offline are still to do (see the roadmap). Try it with [docs/CURL.md](docs/CURL.md).
+**Status: M0 to M2 done; M3 (voice sources, audiobooks, making and serving audio with a free voice) done.** Implemented and tested against the contract: server, devices, audit, events, listeners and settings, the library (import EPUB and text, duplicates, sample book, series, chapters and text, cover and colour sample, search, edit, remove and restore) and places (revisions, conflicts, history, finished). Audio, voices, plans and offline are still to do (see the roadmap). Try it with [docs/CURL.md](docs/CURL.md).
 
 ## Start here
 

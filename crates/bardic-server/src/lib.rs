@@ -3,12 +3,14 @@
 
 pub mod api;
 pub mod app;
+pub mod audio;
 pub mod clock;
 pub mod config;
 pub mod cover;
 pub mod error;
 pub mod events;
 pub mod importer;
+pub mod jobs;
 pub mod lock;
 pub mod places;
 pub mod sample;
@@ -18,4 +20,4 @@ pub mod voices;
 
 /// Version of `docs/contract/openapi.yaml` this server implements. A test
 /// asserts it matches the contract file.
-pub const API_VERSION: &str = "0.2.2";
+pub const API_VERSION: &str = "0.2.3";

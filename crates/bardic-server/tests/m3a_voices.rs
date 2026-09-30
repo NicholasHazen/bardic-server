@@ -1,91 +1,9 @@
 //! M3a: voice sources (against a fake Breeze server), voices and audiobooks.
 mod common;
-use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    routing::get,
-    Json, Router,
-};
-use common::TestServer;
+use common::{breeze::FakeBreeze, TestServer};
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
 
 const SRC: &str = "/api/voice-sources/{source_id}";
-
-#[derive(Default)]
-struct Fake {
-    key: Option<String>,
-    voices: Vec<Value>,
-    reference: Vec<u8>,
-}
-
-type Shared = Arc<Mutex<Fake>>;
-
-fn authorized(f: &Fake, h: &HeaderMap) -> bool {
-    match &f.key {
-        None => true,
-        Some(k) => {
-            h.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {k}"))
-        }
-    }
-}
-
-async fn list(State(f): State<Shared>, h: HeaderMap) -> Result<Json<Value>, StatusCode> {
-    let f = f.lock().unwrap();
-    if !authorized(&f, &h) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(Json(json!({ "data": f.voices })))
-}
-
-async fn reference(
-    State(f): State<Shared>,
-    h: HeaderMap,
-    Path(_id): Path<String>,
-) -> Result<Vec<u8>, StatusCode> {
-    let f = f.lock().unwrap();
-    if !authorized(&f, &h) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(f.reference.clone())
-}
-
-struct FakeBreeze {
-    url: String,
-    state: Shared,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl FakeBreeze {
-    async fn start() -> Self {
-        let state: Shared = Arc::new(Mutex::new(Fake {
-            key: None,
-            reference: b"clip-one".to_vec(),
-            voices: vec![
-                json!({ "id": "mara", "kind": "cloned", "name": "Mara", "description": "Warm, unhurried", "labels": { "language": "en" }, "created_at": "2026-01-01T00:00:00Z", "settings": { "seed": 7 }, "reference": { "text": "hello" } }),
-                json!({ "id": "tobias", "kind": "cloned", "name": "Tobias", "created_at": "2026-01-02T00:00:00Z" }),
-                json!({ "id": "sketch", "kind": "designed", "name": "Sketch" }),
-            ],
-        }));
-        let app = Router::new()
-            .route(
-                "/health",
-                get(|| async { Json(json!({ "status": "ok", "model": "breeze-tts-2" })) }),
-            )
-            .route("/v1/voices", get(list))
-            .route("/v1/voices/{id}/reference", get(reference))
-            .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.ok();
-        });
-        FakeBreeze { url, state, task }
-    }
-    fn stop(&self) {
-        self.task.abort();
-    }
-}
 
 async fn configure(s: &TestServer, body: Value, expect: u16) -> Value {
     s.put(SRC, "/api/voice-sources/breeze", body, expect).await

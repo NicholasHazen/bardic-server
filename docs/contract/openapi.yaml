@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.2
+  version: 0.2.3
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -924,7 +924,10 @@ paths:
       description: |
         Free voices cost nothing. A premium sample is a short real request: it
         counts toward spending and is cached per voice revision, so a repeat is
-        free. Errors: `source_not_set_up` (409), `key_rejected` (409),
+        free. Supports `Range` (206). Premium samples arrive with premium audio;
+        until then a Gemini voice answers 409 `source_not_set_up`. A free voice
+        whose server has changed it since the last refresh answers 409
+        `voice_changed`; a busy server answers 429 `rate_limited`. Errors: `source_not_set_up` (409), `key_rejected` (409),
         `provider_quota` (429).
       x-bardic-cost: may_charge
       responses:
@@ -932,6 +935,11 @@ paths:
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Audio.
+          content:
+            audio/*:
+              schema: {type: string, format: binary}
+        '206':
+          description: Partial audio (the request had a `Range` header).
           content:
             audio/*:
               schema: {type: string, format: binary}
@@ -1052,7 +1060,9 @@ paths:
         with the chapter at the front of the queue (202). Premium voices: spends
         only if the chapter is covered by an approved, running plan for this
         audiobook; otherwise 409 `plan_required`. Joins an already running job
-        for the same chapter. Errors: `source_not_set_up`, `source_unreachable`,
+        for the same audiobook: the chapter moves to the front and the job
+        becomes urgent (it is served before background jobs). The worker makes
+        one request at a time, because a voice server is one machine's GPU. Errors: `source_not_set_up`, `source_unreachable`,
         `plan_required`, `allowance_exceeded`, `limit_exceeded` (409).
       x-bardic-cost: may_charge
       parameters:
@@ -1522,7 +1532,10 @@ paths:
       operationId: pauseJob
       tags: [Jobs]
       summary: Pause a free-voice job
-      description: A job belonging to a plan is paused with `pausePlan` (409 otherwise).
+      description: |
+        A job belonging to a plan is paused with `pausePlan` (409 `job_not_pausable`
+        otherwise, also for a finished job). The request in flight is dropped, so
+        the chapter it was making is started again on resume.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:

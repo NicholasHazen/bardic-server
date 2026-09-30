@@ -2,6 +2,12 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.2.3 (M3b: making audio; additive)
+- `getVoiceSample` documents `206` (Range), `voice_changed` (409) and `rate_limited` (429).
+- Descriptions of `requestChapterAudio` (joining and urgency) and `pauseJob`.
+- New error codes in use: `audiobook_not_found`, `audio_not_found`, `job_not_resumable` (409), `voice_unavailable`, `voice_changed`, `source_unsupported`.
+- Audio is 24 kHz 16-bit mono WAV (`content_type: audio/wav`) for now; clients must read `content_type`, not assume it.
+
 ## 0.2.2 (M3a: voice sources and audiobooks; descriptions only)
 - `configureVoiceSource`: Breeze accepts an optional write-only `api_key` (an empty string clears it); `gemini` answers 400 `source_unsupported` until premium audio exists; source ids equal their kind.
 - `VoiceSource.has_key` applies to Breeze as well as Gemini.
