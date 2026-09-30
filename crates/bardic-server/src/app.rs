@@ -1,0 +1,287 @@
+use crate::{
+    api,
+    clock::{ts, Clock},
+    config::Config,
+    error::ApiError,
+    events::{EventBus, Notice},
+    lock::{InstanceLock, LockError},
+    store::{Store, StoreError},
+};
+use axum::{
+    extract::{FromRequestParts, Request, State},
+    http::{request::Parts, Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, patch},
+    Router,
+};
+use rusqlite::params;
+use serde::Serialize;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
+use tower_http::trace::TraceLayer;
+
+/// Shared by every request.
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Store,
+    pub clock: Arc<dyn Clock>,
+    pub events: Arc<EventBus>,
+    pub config: Arc<Config>,
+    /// Flips to true on shutdown so long-lived streams end and do not block it.
+    pub shutdown: Arc<watch::Sender<bool>>,
+    ids: Arc<Mutex<ulid::Generator>>,
+}
+
+impl AppState {
+    pub fn new(config: Config, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
+        let store = Store::open(&config.data_dir)?;
+        let default_name = config
+            .server_name
+            .clone()
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "Bardic".to_string());
+        let server_id = ulid::Ulid::new().to_string();
+        store.run_blocking(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES('server_id',?1)",
+                [&server_id],
+            )?;
+            c.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES('server_name',?1)",
+                [&default_name],
+            )?;
+            Ok(())
+        })?;
+        Ok(AppState {
+            store,
+            clock,
+            events: Arc::new(EventBus::new()),
+            config: Arc::new(config),
+            shutdown: Arc::new(watch::channel(false).0),
+            ids: Arc::new(Mutex::new(ulid::Generator::new())),
+        })
+    }
+
+    /// A new opaque, sortable identifier.
+    pub fn new_id(&self) -> String {
+        let mut g = self.ids.lock().expect("id generator");
+        g.generate()
+            .unwrap_or_else(|_| ulid::Ulid::new())
+            .to_string()
+    }
+
+    pub fn now(&self) -> String {
+        ts(self.clock.now())
+    }
+
+    pub fn notify(&self, notice: Notice) {
+        self.events.publish(notice);
+    }
+}
+
+/// The device acting, set by the device layer from `X-Bardic-Device`.
+#[derive(Debug, Clone)]
+pub struct DeviceCtx {
+    pub id: String,
+    pub name: String,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for DeviceCtx {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
+        parts
+            .extensions
+            .get::<DeviceCtx>()
+            .cloned()
+            .ok_or_else(device_required)
+    }
+}
+
+fn device_required() -> ApiError {
+    ApiError::invalid(
+        "device_required",
+        "Send X-Bardic-Device (a client-generated device id) on every request that changes something.",
+    )
+}
+
+/// Who acted, for the audit log and change records.
+#[derive(Debug, Clone, Serialize)]
+pub struct Actor {
+    pub listener_id: Option<String>,
+    pub listener_name: Option<String>,
+    pub device_id: String,
+    pub device_name: String,
+}
+
+impl Actor {
+    pub fn device_only(d: &DeviceCtx) -> Self {
+        Actor {
+            listener_id: None,
+            listener_name: None,
+            device_id: d.id.clone(),
+            device_name: d.name.clone(),
+        }
+    }
+}
+
+fn valid_device_id(s: &str) -> bool {
+    (8..=80).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Registers the device on first sight, keeps `last_seen_at` fresh (at most every
+/// 30 seconds), and requires the header on anything that changes state.
+async fn device_layer(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let mutating = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    match req.headers().get("x-bardic-device") {
+        None if mutating => return device_required().into_response(),
+        None => {}
+        Some(v) => {
+            let id = match v.to_str() {
+                Ok(s) if valid_device_id(s) => s.to_string(),
+                _ => {
+                    return ApiError::invalid(
+                        "invalid_request",
+                        "X-Bardic-Device must be 8 to 80 letters, digits, - or _.",
+                    )
+                    .into_response()
+                }
+            };
+            match register_device(&state, id).await {
+                Ok(ctx) => {
+                    req.extensions_mut().insert(ctx);
+                }
+                Err(e) => return e.into_response(),
+            }
+        }
+    }
+    next.run(req).await
+}
+
+async fn register_device(state: &AppState, id: String) -> Result<DeviceCtx, ApiError> {
+    let now = state.clock.now();
+    let (now_s, stale_s) = (ts(now), ts(now - chrono::Duration::seconds(30)));
+    let (ctx, created) = state
+        .store
+        .run(move |c| {
+            let created = c.execute(
+                "INSERT OR IGNORE INTO devices(id,name,first_seen_at,last_seen_at) VALUES(?1,'New device',?2,?2)",
+                params![id, now_s],
+            )? == 1;
+            if !created {
+                c.execute(
+                    "UPDATE devices SET last_seen_at=?2 WHERE id=?1 AND last_seen_at < ?3",
+                    params![id, now_s, stale_s],
+                )?;
+            }
+            let name: String = c.query_row("SELECT name FROM devices WHERE id=?1", [&id], |r| r.get(0))?;
+            Ok((DeviceCtx { id, name }, created))
+        })
+        .await?;
+    if created {
+        state.notify(Notice::new("device.updated", state.now()).with_id(ctx.id.clone()));
+    }
+    Ok(ctx)
+}
+
+async fn route_not_found() -> ApiError {
+    ApiError::not_found("route_not_found", "There is no such operation.")
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        "That method is not supported here.",
+    )
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/health", get(api::system::health))
+        .route(
+            "/api/server",
+            get(api::system::get_server).patch(api::system::update_server),
+        )
+        .route("/api/events", get(api::system::stream_events))
+        .route("/api/devices", get(api::system::list_devices))
+        .route(
+            "/api/devices/{device_id}",
+            patch(api::system::update_device),
+        )
+        .route("/api/audit", get(api::audit::list_audit))
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn_with_state(state.clone(), device_layer))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// A running server: what `main` and the integration tests use.
+pub struct Running {
+    pub addr: SocketAddr,
+    pub state: AppState,
+    _lock: InstanceLock,
+    shutdown: Option<oneshot::Sender<()>>,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error(transparent)]
+    Lock(#[from] LockError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("cannot listen: {0}")]
+    Bind(#[from] std::io::Error),
+}
+
+pub async fn spawn(config: Config, clock: Arc<dyn Clock>) -> Result<Running, StartError> {
+    let lock = InstanceLock::acquire(&config.data_dir)?;
+    let bind = config.bind;
+    let state = AppState::new(config, clock)?;
+    let listener = TcpListener::bind(bind).await?;
+    let addr = listener.local_addr()?;
+    let (tx, rx) = oneshot::channel::<()>();
+    let app = router(state.clone());
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    Ok(Running {
+        addr,
+        state,
+        _lock: lock,
+        shutdown: Some(tx),
+        handle,
+    })
+}
+
+impl Running {
+    pub async fn stop(mut self) {
+        let _ = self.state.shutdown.send(true);
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        // Streams end on the flag; the timeout is a backstop for stuck connections.
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.handle)
+            .await
+            .is_err()
+        {
+            self.handle.abort();
+        }
+    }
+}

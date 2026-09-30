@@ -27,5 +27,8 @@ Entry point for coding agents. User instructions for the current task take prece
 - Every operation has a conformance test: it receives its 2xx, and the response is validated against `openapi.yaml`. Undeclared fields and undocumented statuses fail the test; fix the code or the contract, never the check.
 - Crash tests kill the process mid-job and assert P3.
 
+## Conformance harness
+`tests/common/mod.rs` validates every response against `docs/contract/openapi.yaml` (undeclared fields, missing fields, types, formats, undocumented statuses). If it fails, change the contract first (bump `info.version` and `API_VERSION`, add a line to `docs/contract/CHANGELOG.md`); never loosen the harness.
+
 ## Workflow
 Inspect `git status`, keep changes scoped, update the spec or contract when behaviour changes, run `cargo fmt`, `cargo clippy` and `cargo test`, and report what was actually verified (mock versus live).

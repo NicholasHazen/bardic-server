@@ -40,7 +40,7 @@ The server has no "current listener": two devices can act as different people at
 `Idempotency-Key` on operations that create things (imports, plans, make-ready). A retry with the same key and body returns the first result.
 
 ### Errors
-Every error body is `Error {code, detail, retryable?, retry_after_seconds?, context?}`. `code` is stable and machine-readable (an open enumeration: clients treat unknown codes by status). `detail` is safe to show. Status classes: 400 invalid, 404 not found, 409 conflict with state, 413 too large, 429 limited.
+Every error body is `Error {code, detail, retryable?, retry_after_seconds?, context?}`. `code` is stable and machine-readable (an open enumeration: clients treat unknown codes by status). `detail` is safe to show. Status classes: 400 invalid, 404 not found, 409 conflict with state, 413 too large, 429 limited, 500 unexpected. **Every operation can return 400 (a malformed header or parameter) and 500 (`internal_error`, retryable)**; operations list only the other statuses that are specific to them in prose.
 
 Codes used (not exhaustive):
 | Area | Codes |
@@ -53,7 +53,7 @@ Codes used (not exhaustive):
 | Plans | `plan_required`, `estimate_expired`, `estimate_changed`, `limit_below_estimate`, `limit_exceeded`, `allowance_exceeded` |
 | Jobs | `job_not_found`, `job_running`, `job_not_pausable` |
 | Audio | `nothing_ready` |
-| General | `invalid_request`, `rate_limited`, `storage_full` |
+| General | `invalid_request`, `device_required`, `rate_limited`, `storage_full` |
 
 ### Routing
 Literal segments win over parameters: `/api/books/duplicates` and `/api/books/sample` are not book ids.

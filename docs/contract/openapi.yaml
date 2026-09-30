@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.1.0
+  version: 0.2.0
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -40,6 +40,8 @@ paths:
       description: Returns 200 when the server can take requests. Needs no headers.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Server is up.
           content:
@@ -52,6 +54,8 @@ paths:
       summary: Server identity and capabilities
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The server.
           content:
@@ -74,6 +78,7 @@ paths:
               properties:
                 name: {type: string, minLength: 1, maxLength: 60}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The updated server.
           content:
@@ -98,6 +103,8 @@ paths:
           required: false
           schema: {type: string}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Event stream.
           content:
@@ -111,6 +118,8 @@ paths:
       description: Devices register themselves on first request that carries `X-Bardic-Device`.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Devices, most recently seen first.
           content:
@@ -123,6 +132,7 @@ paths:
       tags: [System]
       summary: Name a device
       x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
         required: true
         content:
@@ -133,6 +143,8 @@ paths:
               properties:
                 name: {type: string, minLength: 1, maxLength: 60}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The device.
           content:
@@ -149,6 +161,8 @@ paths:
       description: Ordered by name. Includes `last_listened_at` so pickers can show recency.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Listeners.
           content:
@@ -169,6 +183,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/ListenerInput'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '201':
           description: The new listener.
           content:
@@ -184,6 +199,8 @@ paths:
       summary: Get a listener
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The listener.
           content:
@@ -203,6 +220,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/ListenerInput'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The listener.
           content:
@@ -222,6 +240,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '204': {description: "Deleted."}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
@@ -234,6 +254,8 @@ paths:
       description: Used by the delete confirmation ("6 books started").
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Counts.
           content:
@@ -254,6 +276,8 @@ paths:
       summary: Get a listener's settings
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Settings.
           content:
@@ -276,6 +300,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/ListenerSettings'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Settings.
           content:
@@ -308,6 +333,7 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: A page of books.
           content:
@@ -328,6 +354,7 @@ paths:
         - {name: title, in: query, schema: {type: string}}
         - {name: author, in: query, schema: {type: string}}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Matches.
           content:
@@ -362,6 +389,7 @@ paths:
               properties:
                 file: {type: string, format: binary}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '202':
           description: Accepted.
           content:
@@ -377,6 +405,8 @@ paths:
       summary: Read an import
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The import.
           content:
@@ -389,7 +419,10 @@ paths:
       summary: Cancel an import in progress
       description: No effect, and 204, when it already finished.
       x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '204': {description: "Cancelled or already finished."}
         '404': {$ref: '#/components/responses/NotFound'}
   /api/books/sample:
@@ -401,6 +434,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '201':
           description: The book.
           content:
@@ -415,6 +450,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The book.
           content:
@@ -434,6 +471,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/BookUpdate'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The book.
           content:
@@ -453,6 +491,8 @@ paths:
         immutable and cacheable forever. 404 when the book has no cover.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: JPEG thumbnail.
           content:
@@ -468,6 +508,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The book.
           content:
@@ -484,6 +526,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The book, state `removed`.
           content:
@@ -499,6 +543,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The book.
           content:
@@ -513,6 +559,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Series.
           content:
@@ -532,6 +580,8 @@ paths:
       summary: Chapters of a book, in reading order
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Chapters.
           content:
@@ -559,6 +609,8 @@ paths:
         offline caches.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Text and lines.
           content:
@@ -578,6 +630,8 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Matches.
           content:
@@ -597,6 +651,8 @@ paths:
       description: 404 `place_not_found` when the listener never opened the book.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The place.
           content:
@@ -624,6 +680,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/PlaceInput'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The stored place.
           content:
@@ -644,6 +701,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '204': {description: "Cleared."}
   /api/books/{book_id}/place/finished:
     parameters:
@@ -669,6 +728,8 @@ paths:
               properties:
                 finished: {type: boolean}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The place.
           content:
@@ -689,6 +750,8 @@ paths:
         entry's chapter and offset with `putPlace`.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: History.
           content:
@@ -713,6 +776,8 @@ paths:
         or not. `local` is `unavailable` when the computer has no usable voices.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Sources.
           content:
@@ -732,6 +797,8 @@ paths:
       summary: Get a source
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The source.
           content:
@@ -755,6 +822,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/VoiceSourceConfig'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The source.
           content:
@@ -770,6 +838,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '204': {description: "Removed."}
         '404': {$ref: '#/components/responses/NotFound'}
   /api/voice-sources/{source_id}/test:
@@ -780,7 +850,10 @@ paths:
       summary: Check that a source works now
       description: Reads the voice list only. Never speaks, never spends.
       x-bardic-cost: network
+      parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Result; the source state is updated too.
           content:
@@ -798,7 +871,10 @@ paths:
         once a day by the server. If the source is unreachable the last known
         voices stay listed with `available: false`.
       x-bardic-cost: network
+      parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The source.
           content:
@@ -816,6 +892,8 @@ paths:
         - {name: tier, in: query, schema: {$ref: '#/components/schemas/Tier'}}
         - {name: language, in: query, schema: {type: string}}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Voices.
           content:
@@ -840,6 +918,8 @@ paths:
         `provider_quota` (429).
       x-bardic-cost: may_charge
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Audio.
           content:
@@ -858,6 +938,8 @@ paths:
       summary: Audiobooks of a book
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Audiobooks.
           content:
@@ -891,6 +973,8 @@ paths:
               properties:
                 voice_id: {type: string}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Existing audiobook.
           content:
@@ -911,6 +995,8 @@ paths:
       summary: Get an audiobook
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The audiobook.
           content:
@@ -926,6 +1012,8 @@ paths:
       description: One word per chapter (`not_yet`, `making`, `ready`); reasons are details.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Chapters in reading order.
           content:
@@ -966,6 +1054,8 @@ paths:
               properties:
                 ahead: {type: integer, minimum: 0, maximum: 5, default: 1, description: "Also queue this many following chapters behind it."}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Already ready.
           content:
@@ -1002,6 +1092,8 @@ paths:
               properties:
                 scope: {$ref: '#/components/schemas/Scope'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '202':
           description: Job started or joined.
           content:
@@ -1018,6 +1110,8 @@ paths:
       description: Drives the free-up-space sheet. Read-only.
       x-bardic-cost: network
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Usage.
           content:
@@ -1035,6 +1129,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Result.
           content:
@@ -1058,6 +1154,8 @@ paths:
         ETag is the id.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Whole audio.
           content:
@@ -1079,6 +1177,8 @@ paths:
       description: Drives read-along highlighting. Immutable like the audio.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Timings.
           content:
@@ -1100,7 +1200,7 @@ paths:
         end exceeds what is left, `blocked` explains and the plan cannot be
         approved. Errors: `source_not_set_up`, `key_rejected` (409).
       x-bardic-cost: network
-      parameters: [{$ref: '#/components/parameters/Listener'}]
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       requestBody:
         required: true
         content:
@@ -1111,6 +1211,8 @@ paths:
               properties:
                 scope: {$ref: '#/components/schemas/Scope'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The estimate.
           content:
@@ -1131,6 +1233,8 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: A page of plans, newest first.
           content:
@@ -1158,6 +1262,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/PlanApproval'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '201':
           description: The plan, `running`.
           content:
@@ -1174,6 +1279,8 @@ paths:
       summary: Get a plan
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The plan.
           content:
@@ -1189,6 +1296,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The plan.
           content:
@@ -1218,6 +1327,8 @@ paths:
               properties:
                 new_limit: {$ref: '#/components/schemas/Money'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The plan.
           content:
@@ -1235,6 +1346,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The plan, `stopped`.
           content:
@@ -1248,6 +1361,8 @@ paths:
       summary: Allowance and this month's spending
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The allowance.
           content:
@@ -1270,6 +1385,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/AllowanceInput'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The allowance.
           content:
@@ -1283,6 +1399,8 @@ paths:
       summary: Prices the server is using, with their dates
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Prices.
           content:
@@ -1304,7 +1422,10 @@ paths:
         whenever usage is fetched. A failure keeps the last prices and reports
         their age in `Price.refresh_error`.
       x-bardic-cost: network
+      parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Prices.
           content:
@@ -1334,6 +1455,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/PriceTable'}
       responses:
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The price.
           content:
@@ -1356,6 +1478,8 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: A page of jobs, newest first.
           content:
@@ -1369,6 +1493,8 @@ paths:
       summary: Get a job
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The job.
           content:
@@ -1385,6 +1511,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The job.
           content:
@@ -1401,6 +1529,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The job.
           content:
@@ -1418,6 +1548,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The job.
           content:
@@ -1438,6 +1570,8 @@ paths:
         `getChapterText` for the chapters they choose.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Manifest.
           content:
@@ -1455,6 +1589,7 @@ paths:
         made again, the response says what changed, so the client can show the
         comparison and let the listener decide. Read-only; nothing is replaced.
       x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
         required: true
         content:
@@ -1472,6 +1607,8 @@ paths:
                       chapter_id: {type: string}
                       audio_id: {type: string}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Result.
           content:
@@ -1489,6 +1626,8 @@ paths:
       description: 404 `deletion_not_found` when none is scheduled.
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The schedule.
           content:
@@ -1515,6 +1654,8 @@ paths:
               properties:
                 delay_seconds: {type: integer, minimum: 60, default: 60}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '202':
           description: Scheduled.
           content:
@@ -1530,6 +1671,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '204': {description: "Cancelled."}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
@@ -1553,6 +1696,8 @@ paths:
               properties:
                 format: {type: string, enum: [m4b], default: m4b}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '202':
           description: The export.
           content:
@@ -1569,6 +1714,8 @@ paths:
       summary: Read an export
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The export.
           content:
@@ -1584,6 +1731,8 @@ paths:
       summary: Download the exported file
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The file.
           content:
@@ -1598,6 +1747,8 @@ paths:
       summary: Backups made by this server
       x-bardic-cost: none
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Backups.
           content:
@@ -1620,6 +1771,8 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '202':
           description: Started.
           content:
@@ -1640,6 +1793,8 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: A page of records, newest first.
           content:
@@ -1700,6 +1855,11 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
     Conflict:
       description: The request conflicts with current state; `code` says how.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    ServerError:
+      description: An unexpected failure on the server. Nothing you need to undo was changed; `retryable` is true.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -1785,7 +1945,8 @@ components:
         A change notice. `type` is an open enumeration; current values:
         `book.updated`, `import.updated`, `place.updated`, `audiobook.updated`,
         `chapter.updated`, `job.updated`, `plan.updated`, `allowance.updated`,
-        `source.updated`, `listener.updated`, `deletion.updated`, `resync`.
+        `source.updated`, `listener.updated`, `deletion.updated`, `server.updated`,
+        `device.updated`, `resync`.
         Only ids are carried; re-read the resource.
       properties:
         type: {type: string}
@@ -2248,9 +2409,10 @@ components:
     Actor:
       type: object
       required: [listener_id, listener_name, device_id, device_name]
+      description: Who acted. The listener is null when no listener existed or applied (for example renaming the server, or creating the first listener).
       properties:
-        listener_id: {type: string}
-        listener_name: {type: string}
+        listener_id: {type: [string, 'null']}
+        listener_name: {type: [string, 'null']}
         device_id: {type: string}
         device_name: {type: string}
     AllowancePosition:
