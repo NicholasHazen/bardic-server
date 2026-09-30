@@ -8,6 +8,7 @@ pub mod imports;
 pub mod listeners;
 pub mod money;
 pub mod places;
+pub mod plans;
 pub mod system;
 pub mod voices;
 

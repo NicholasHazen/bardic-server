@@ -31,7 +31,7 @@ pub struct MoneyIn {
 }
 
 impl MoneyIn {
-    fn micros(&self, what: &str, min: i64) -> Result<i64, ApiError> {
+    pub fn micros(&self, what: &str, min: i64) -> Result<i64, ApiError> {
         if self.currency != CURRENCY {
             return Err(ApiError::invalid(
                 "invalid_request",

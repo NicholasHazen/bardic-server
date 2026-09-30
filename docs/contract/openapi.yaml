@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.4
+  version: 0.2.5
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -1223,7 +1223,11 @@ paths:
         and an `estimate_id` valid for 15 minutes. Refreshes provider prices if
         they are stale. Spends nothing. When a monthly limit is set and the low
         end exceeds what is left, `blocked` explains and the plan cannot be
-        approved. Errors: `source_not_set_up`, `key_rejected` (409).
+        approved. The range is the likely cost from the price table (per million
+        characters of text spoken) with the low end at 75% and the high end at 140%
+        of it, covering how fast a voice speaks; it is an assumption, not a quote.
+        Only premium audiobooks take a plan. Errors (409): `plan_not_needed` (a
+        free voice), `source_not_set_up`, `key_rejected`.
       x-bardic-cost: network
       parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -1272,10 +1276,23 @@ paths:
       description: |
         The approval. Needs the `estimate_id` from `previewPlan` and the `limit`
         the listener accepted, so what was shown is what is approved. Creates a
-        plan and its job. Errors (409): `estimate_expired`, `estimate_changed`
-        (prices moved past the stated range; preview again),
-        `allowance_exceeded`, `limit_below_estimate`, `key_rejected`,
-        `source_not_set_up`. Records listener and device.
+        plan and its job. An estimate can be approved once. The limit must be at
+        least the estimate's likely cost. Errors (409): `estimate_expired`,
+        `estimate_used`, `estimate_changed` (the chapters to make or the prices
+        moved past the stated range; preview again), `allowance_exceeded`,
+        `limit_below_estimate`, `nothing_to_make`, `plan_active` (one plan at a
+        time per audiobook; `context.plan_id` names it), `key_rejected`,
+        `source_not_set_up`. Unknown estimate is 404 `estimate_not_found`.
+        Records listener and device. An `Idempotency-Key` returns the first plan.
+
+        While the plan runs, money is held back before each request at its high
+        estimate, and a request that could pass the plan's limit or the monthly
+        limit is not sent: a chapter is started only if the rest of it fits. If a
+        provider's real cost is higher than the estimate, a limit can still be
+        passed by the cost of the request in flight. A request whose cost cannot be
+        stated (no usage reported, a timeout, a stop mid-request) is counted in
+        `spent.unknown_items`, never as zero. Gemini answering without audio counts
+        as spent and fails that chapter; it is not retried until you resume.
       x-bardic-cost: may_charge
       parameters:
         - {$ref: '#/components/parameters/Listener'}
@@ -1318,6 +1335,7 @@ paths:
       operationId: pausePlan
       tags: [Plans]
       summary: Pause at the next chapter boundary
+      description: The chapter being made is finished and kept, because it is already paid for. 409 `job_not_pausable` unless the plan is running or waiting.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       responses:

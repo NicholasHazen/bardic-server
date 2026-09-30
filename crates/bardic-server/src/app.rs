@@ -427,6 +427,15 @@ pub fn router(state: AppState) -> Router {
             post(api::voices::refresh),
         )
         .route(
+            "/api/audiobooks/{audiobook_id}/plan-preview",
+            post(api::plans::preview),
+        )
+        .route("/api/plans", get(api::plans::list).post(api::plans::create))
+        .route("/api/plans/{plan_id}", get(api::plans::get_one))
+        .route("/api/plans/{plan_id}/pause", post(api::plans::pause))
+        .route("/api/plans/{plan_id}/resume", post(api::plans::resume))
+        .route("/api/plans/{plan_id}/stop", post(api::plans::stop))
+        .route(
             "/api/allowance",
             get(api::money::get_allowance).put(api::money::put_allowance),
         )

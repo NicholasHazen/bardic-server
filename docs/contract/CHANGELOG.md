@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.2.5 (M4b/c: plans and paid audio; descriptions only)
+- Plan operations, spending rules and their codes are documented: `plan_not_needed`, `estimate_not_found`, `estimate_used`, `nothing_to_make`, `plan_active`, `plan_not_resumable`, `provider_uncertain`, `provider_quota`.
+- A plan's `state` mirrors its job: queued and running are both `running`; `approved` is never returned.
+- Needs-you codes on plans and jobs: `limit_exceeded`, `allowance_exceeded`, `key_rejected`, `provider_refused`, `repeated_failure`; waiting: `waiting_quota` (`until` set).
+
 ## 0.2.4 (M4a: Gemini source, prices, Allowance; descriptions only)
 - `configureVoiceSource` works for `gemini` (30 prebuilt voices, key checked against the free model list); `source_unsupported` is no longer returned.
 - `refreshPrices` and `Price` document that prices are a dated manual table until a provider price interface is connected. Only `USD` is accepted for money.

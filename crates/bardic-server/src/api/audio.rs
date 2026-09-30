@@ -22,14 +22,14 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 const ACTIVE: &str = "('queued','running','waiting','paused','needs_you')";
 
 /// What a request to make audio needs to know about the audiobook.
-struct Target {
-    book_id: String,
-    tier: String,
-    source_state: String,
-    available: bool,
+pub struct Target {
+    pub book_id: String,
+    pub tier: String,
+    pub source_state: String,
+    pub available: bool,
 }
 
-fn target(conn: &Connection, audiobook: &str) -> Result<Target, ApiError> {
+pub fn target(conn: &Connection, audiobook: &str) -> Result<Target, ApiError> {
     conn.query_row(
         "SELECT a.book_id,v.tier,s.state,v.available FROM audiobooks a JOIN voices v ON v.id=a.voice_id JOIN voice_sources s ON s.id=v.source_id WHERE a.id=?1",
         [audiobook],
@@ -79,7 +79,7 @@ fn chapter_index(conn: &Connection, book: &str, chapter: &str) -> Result<i64, Ap
     })
 }
 
-fn has_audio(conn: &Connection, audiobook: &str, chapter: &str) -> Result<bool, ApiError> {
+pub fn has_audio(conn: &Connection, audiobook: &str, chapter: &str) -> Result<bool, ApiError> {
     Ok(conn
         .query_row(
             "SELECT 1 FROM audio WHERE audiobook_id=?1 AND chapter_id=?2",
@@ -166,6 +166,26 @@ pub async fn request_chapter(
                 let item = states["items"].as_array().and_then(|a| a.iter().find(|i| i["chapter_id"] == chapter.as_str())).cloned().unwrap_or(Value::Null);
                 return Ok((StatusCode::OK, item, false));
             }
+            if t.tier == "premium" {
+                // Premium audio is made only under a running plan that still has this chapter to do.
+                let job: Option<String> = tx
+                    .query_row(
+                        "SELECT j.id FROM jobs j JOIN job_items i ON i.job_id=j.id
+                         WHERE j.audiobook_id=?1 AND j.plan_id IS NOT NULL AND j.state IN ('queued','running','waiting') AND i.chapter_id=?2 AND i.state='queued' LIMIT 1",
+                        [&audiobook, &chapter],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(j) = job else {
+                    return Err(ApiError::conflict("plan_required", "Premium audio is made only under an approved plan. Preview and approve a plan first."));
+                };
+                let front: i64 = tx.query_row("SELECT COALESCE(MIN(position),1)-1 FROM job_items WHERE job_id=?1", [&j], |r| r.get(0))?;
+                tx.execute("UPDATE job_items SET position=?2 WHERE job_id=?1 AND chapter_id=?3", params![j, front, chapter])?;
+                tx.execute("UPDATE jobs SET urgent=1 WHERE id=?1", [&j])?;
+                let v = jobs::job_value(&tx, &j)?;
+                tx.commit()?;
+                return Ok((StatusCode::ACCEPTED, v, true));
+            }
             require_ready_to_make(&t)?;
             // The chapter first, then the next few that are not made yet.
             let mut wanted = vec![chapter.clone()];
@@ -209,12 +229,72 @@ pub async fn request_chapter(
     Ok((out.0, Json(out.1)).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeIn {
-    kind: String,
-    from_chapter_id: Option<String>,
-    chapter_ids: Option<Vec<String>>,
+    pub kind: String,
+    pub from_chapter_id: Option<String>,
+    pub chapter_ids: Option<Vec<String>>,
+}
+
+impl ScopeIn {
+    /// The contract's `Scope`.
+    pub fn value(&self) -> Value {
+        let mut v = json!({ "kind": self.kind, "from_chapter_id": self.from_chapter_id });
+        if let Some(c) = &self.chapter_ids {
+            v["chapter_ids"] = json!(c);
+        }
+        v
+    }
+}
+
+/// The chapters a scope names, in reading order.
+pub fn resolve_scope(
+    tx: &Connection,
+    book_id: &str,
+    scope: &ScopeIn,
+) -> Result<Vec<String>, ApiError> {
+    let ordered: Vec<(String, i64)> = tx
+        .prepare("SELECT id,idx FROM chapters WHERE book_id=?1 ORDER BY idx")?
+        .query_map([book_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(match scope.kind.as_str() {
+        "whole_book" => ordered.iter().map(|(id, _)| id.clone()).collect(),
+        "from_chapter" => {
+            let from = scope.from_chapter_id.as_deref().ok_or_else(|| {
+                ApiError::invalid("invalid_request", "from_chapter needs from_chapter_id.")
+            })?;
+            let idx = chapter_index(tx, book_id, from)?;
+            ordered
+                .iter()
+                .filter(|(_, i)| *i >= idx)
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+        "chapters" => {
+            let ids = scope
+                .chapter_ids
+                .as_deref()
+                .filter(|l| !l.is_empty())
+                .ok_or_else(|| {
+                    ApiError::invalid("invalid_request", "chapters needs a non-empty chapter_ids.")
+                })?;
+            for id in ids {
+                chapter_index(tx, book_id, id)?;
+            }
+            ordered
+                .iter()
+                .filter(|(id, _)| ids.contains(id))
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+        _ => {
+            return Err(ApiError::invalid(
+                "invalid_request",
+                "scope.kind must be whole_book, from_chapter or chapters.",
+            ))
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -257,51 +337,7 @@ pub async fn make_ready(
                     return Ok((jobs::job_value(&tx, &j)?, false));
                 }
             }
-            let scope = &input.scope;
-            let ordered: Vec<(String, i64)> = tx
-                .prepare("SELECT id,idx FROM chapters WHERE book_id=?1 ORDER BY idx")?
-                .query_map([&t.book_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<_, _>>()?;
-            let chosen: Vec<String> = match scope.kind.as_str() {
-                "whole_book" => ordered.iter().map(|(id, _)| id.clone()).collect(),
-                "from_chapter" => {
-                    let from = scope.from_chapter_id.as_deref().ok_or_else(|| {
-                        ApiError::invalid("invalid_request", "from_chapter needs from_chapter_id.")
-                    })?;
-                    let idx = chapter_index(&tx, &t.book_id, from)?;
-                    ordered
-                        .iter()
-                        .filter(|(_, i)| *i >= idx)
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                }
-                "chapters" => {
-                    let ids = scope
-                        .chapter_ids
-                        .as_deref()
-                        .filter(|l| !l.is_empty())
-                        .ok_or_else(|| {
-                            ApiError::invalid(
-                                "invalid_request",
-                                "chapters needs a non-empty chapter_ids.",
-                            )
-                        })?;
-                    for id in ids {
-                        chapter_index(&tx, &t.book_id, id)?;
-                    }
-                    ordered
-                        .iter()
-                        .filter(|(id, _)| ids.contains(id))
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                }
-                _ => {
-                    return Err(ApiError::invalid(
-                        "invalid_request",
-                        "scope.kind must be whole_book, from_chapter or chapters.",
-                    ))
-                }
-            };
+            let chosen = resolve_scope(&tx, &t.book_id, &input.scope)?;
             require_ready_to_make(&t)?;
             let mut missing = vec![];
             for ch in chosen {
@@ -693,11 +729,28 @@ pub async fn voice_sample(
             return Ok(resp);
         }
     }
-    if tier == "premium" || source_state == "not_set_up" {
+    if source_state == "not_set_up" {
         return Err(ApiError::conflict(
             "source_not_set_up",
             format!("The {source} source is not set up."),
         ));
+    }
+    if source_state == "key_rejected" {
+        return Err(ApiError::conflict(
+            "key_rejected",
+            "The API key was rejected.",
+        ));
+    }
+    if tier == "premium" && available {
+        return premium_sample(
+            &state,
+            &voice_id,
+            &external,
+            &revision,
+            &config,
+            range.as_deref(),
+        )
+        .await;
     }
     if !available || source_state != "connected" {
         return Err(ApiError::conflict(
@@ -778,6 +831,173 @@ pub async fn voice_sample(
         "audio/wav",
         &format!("{voice_id}-{revision}"),
         range.as_deref(),
+        false,
+    )
+    .await
+}
+
+/// A premium sample is a short real request: reserved against this month's Allowance, settled from
+/// the usage Gemini reports, and cached per voice revision so a repeat costs nothing.
+async fn premium_sample(
+    state: &AppState,
+    voice_id: &str,
+    external: &str,
+    revision: &str,
+    config: &str,
+    range: Option<&str>,
+) -> Result<Response, ApiError> {
+    use crate::{plans, spend, voices::gemini};
+    let cfg: Value = serde_json::from_str(config).unwrap_or(Value::Null);
+    let key = cfg["api_key"].as_str().unwrap_or_default().to_string();
+    let (spend_id, vid, now) = (state.new_id(), voice_id.to_string(), state.clock.now());
+    let sid = spend_id.clone();
+    let denied = state
+        .store
+        .run(move |c| {
+            let price: i64 = c.query_row(
+                "SELECT per_unit FROM prices WHERE provider='gemini'",
+                [],
+                |r| r.get(0),
+            )?;
+            let amount = plans::estimate(SAMPLE_TEXT.chars().count() as i64, price)
+                .high
+                .max(1);
+            spend::reserve(
+                c,
+                &spend::Reservation {
+                    id: &sid,
+                    plan: None,
+                    audiobook_id: "",
+                    chapter_id: Some(&vid),
+                    amount,
+                    now,
+                },
+            )
+        })
+        .await?;
+    if denied.is_err() {
+        return Err(ApiError::conflict(
+            "allowance_exceeded",
+            "This month's Allowance is used up, so a premium sample cannot be made.",
+        ));
+    }
+    let result = gemini::speak(&state.config.gemini_url, &key, external, SAMPLE_TEXT).await;
+    let (outcome, speech) = match result {
+        Ok(s) => (
+            match s.usage.cost_micros() {
+                Some(m) => spend::Outcome::Known {
+                    micros: m,
+                    input: s.usage.input_tokens,
+                    output: s.usage.output_tokens,
+                },
+                None => spend::Outcome::Unknown {
+                    note: "Gemini did not report complete usage.",
+                },
+            },
+            Ok(s),
+        ),
+        Err(e) => match e {
+            gemini::SpeakError::NoAudio(u) => (
+                match u.cost_micros() {
+                    Some(m) => spend::Outcome::Known {
+                        micros: m,
+                        input: u.input_tokens,
+                        output: u.output_tokens,
+                    },
+                    None => spend::Outcome::Unknown {
+                        note: "Gemini answered without audio and without complete usage.",
+                    },
+                },
+                Err(ApiError::conflict(
+                    "provider_refused",
+                    "Gemini answered without audio. The request is counted as spent.",
+                )),
+            ),
+            gemini::SpeakError::Uncertain => (
+                spend::Outcome::Unknown {
+                    note: "The request may have been processed.",
+                },
+                Err(ApiError::conflict(
+                    "provider_uncertain",
+                    "The request may have been processed; its cost is counted as unknown.",
+                )),
+            ),
+            gemini::SpeakError::Failed(m) => (
+                spend::Outcome::Unknown {
+                    note: "The response could not be used; the request was billed.",
+                },
+                Err(ApiError::conflict("provider_refused", m)),
+            ),
+            gemini::SpeakError::KeyRejected => (
+                spend::Outcome::Nothing,
+                Err(ApiError::conflict(
+                    "key_rejected",
+                    "Gemini rejected the API key.",
+                )),
+            ),
+            gemini::SpeakError::Unreachable => (
+                spend::Outcome::Nothing,
+                Err(ApiError::conflict(
+                    "source_unreachable",
+                    "Gemini could not be reached.",
+                )),
+            ),
+            gemini::SpeakError::Refused(c) => (
+                spend::Outcome::Nothing,
+                Err(ApiError::conflict(
+                    "provider_refused",
+                    format!("Gemini refused the sample ({c})"),
+                )),
+            ),
+            gemini::SpeakError::Quota { retry_after, .. } => {
+                let mut e = ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "provider_quota",
+                    "Gemini's quota or rate limit was reached. Try again later.",
+                );
+                e.retryable = Some(true);
+                e.retry_after_seconds = Some(retry_after.min(u32::MAX as u64) as u32);
+                (spend::Outcome::Nothing, Err(e))
+            }
+        },
+    };
+    let sid = spend_id.clone();
+    state
+        .store
+        .run(move |c| spend::settle(c, &sid, &outcome))
+        .await?;
+    let speech = speech?;
+    let rel = format!("samples/{voice_id}/{revision}.wav");
+    let full = state.store.data_dir().join(&rel);
+    let mut wav = crate::audio::wav_header(speech.pcm.len() as u32).to_vec();
+    wav.extend_from_slice(&speech.pcm);
+    if let Some(dir) = full.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    tokio::fs::write(&full, &wav)
+        .await
+        .map_err(ApiError::internal)?;
+    let (vid, rev, p, at, n) = (
+        voice_id.to_string(),
+        revision.to_string(),
+        rel,
+        state.now(),
+        wav.len() as i64,
+    );
+    state
+        .store
+        .run(move |c| {
+            c.execute("INSERT OR REPLACE INTO voice_samples(voice_id,revision,path,bytes,content_type,created_at) VALUES(?1,?2,?3,?4,'audio/wav',?5)", params![vid, rev, p, n, at])?;
+            Ok(())
+        })
+        .await?;
+    file_response(
+        full,
+        "audio/wav",
+        &format!("{voice_id}-{revision}"),
+        range,
         false,
     )
     .await

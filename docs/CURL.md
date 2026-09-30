@@ -119,6 +119,21 @@ curl -s $B/api/audio/<audio id>/timings
 curl -s $B/api/voices/<voice id>/sample -o sample.wav
 ```
 
+## Premium audio: plans and the Allowance (M4)
+```sh
+# Connect Gemini (the key is checked first and never shown again)
+curl -s -X PUT -H "$D" -H "$J" -d '{"api_key":"<key>"}' $B/api/voice-sources/gemini
+# Price it: a range, nothing is spent. Valid for 15 minutes.
+curl -s -X POST -H "$D" -H "$L" -H "$J" -d '{"scope":{"kind":"whole_book"}}' $B/api/audiobooks/$AB/plan-preview
+# Approve it with the limit you accept (estimate_id from the preview; an estimate is approved once)
+curl -s -X POST -H "$D" -H "$L" -H "$J" -d '{"estimate_id":"<id>","limit":{"micros":9200000,"currency":"USD"}}' $B/api/plans
+curl -s $B/api/plans/<plan id>                      # state, spent, waiting, needs_you
+curl -s -X POST -H "$D" -H "$L" -H "$J" -d '{"new_limit":{"micros":12000000,"currency":"USD"}}' $B/api/plans/<plan id>/resume
+curl -s -X POST -H "$D" -H "$L" $B/api/plans/<plan id>/pause   # or /stop
+curl -s $B/api/allowance; curl -s $B/api/prices
+curl -s -X PUT -H "$D" -H "$L" -H "$J" -d '{"monthly_limit":{"micros":25000000,"currency":"USD"},"default_plan_limit":{"micros":10000000,"currency":"USD"}}' $B/api/allowance
+```
+
 ## Browsers on another address
 
 ```sh
