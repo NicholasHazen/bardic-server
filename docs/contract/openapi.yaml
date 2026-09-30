@@ -1,0 +1,2436 @@
+openapi: 3.1.0
+info:
+  title: Bardic server API
+  version: 0.1.0
+  summary: Contract between the Bardic server and its clients (draft).
+  description: |
+    Normative, language-neutral contract for Bardic v2. It is derived from
+    `docs/PRODUCT-SPEC.md`, not from the prototype. Clients are generated
+    from this file; the server must satisfy it. Read `README.md` in this folder
+    first: it explains identity headers, errors, money, events, long-running
+    work and the place-sync protocol once, so each operation does not repeat them.
+
+    Status: pre-release (0.x). Until 1.0.0, additive changes bump the patch
+    version and breaking changes bump the minor version.
+  license:
+    name: Personal use
+    identifier: LicenseRef-Personal
+servers:
+  - url: http://localhost:8765
+    description: Default local address. The server name and address are configurable.
+tags:
+  - {name: System, description: "Server identity, health, events, devices."}
+  - {name: Listeners, description: "People who use Bardic, and their settings."}
+  - {name: Library, description: "Books, imports, series, cover, text and search."}
+  - {name: Places, description: "A listener's place in a book."}
+  - {name: Voices, description: "Voice sources and the voices they report."}
+  - {name: Audiobooks, description: "A book voiced by one voice; its chapters and audio."}
+  - {name: Plans, description: "Priced proposals for premium work, and the Allowance."}
+  - {name: Jobs, description: "Background work."}
+  - {name: Offline, description: "Manifests and update checks for downloaded audio."}
+  - {name: Admin, description: "Export, backup, deletion and audit."}
+
+paths:
+  # ------------------------------------------------------------ System
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [System]
+      summary: Liveness check
+      description: Returns 200 when the server can take requests. Needs no headers.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Server is up.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+  /api/server:
+    get:
+      operationId: getServer
+      tags: [System]
+      summary: Server identity and capabilities
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The server.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Server'}
+    patch:
+      operationId: updateServer
+      tags: [System]
+      summary: Rename the server
+      description: Changing the name never changes the address clients use.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 60}
+      responses:
+        '200':
+          description: The updated server.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Server'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+  /api/events:
+    get:
+      operationId: streamEvents
+      tags: [System]
+      summary: Live change notifications (Server-Sent Events)
+      description: |
+        A long-lived `text/event-stream`. Each event is a `Notice` carrying ids
+        only; clients re-read the resource. Supports `Last-Event-ID` to resume;
+        if the server cannot replay from that id it sends a `resync` notice and
+        clients reload what they show.
+      x-bardic-cost: none
+      parameters:
+        - {$ref: '#/components/parameters/Listener'}
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        '200':
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema: {$ref: '#/components/schemas/Notice'}
+  /api/devices:
+    get:
+      operationId: listDevices
+      tags: [System]
+      summary: Devices that have used this server
+      description: Devices register themselves on first request that carries `X-Bardic-Device`.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Devices, most recently seen first.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceList'}
+  /api/devices/{device_id}:
+    parameters: [{$ref: '#/components/parameters/DeviceId'}]
+    patch:
+      operationId: updateDevice
+      tags: [System]
+      summary: Name a device
+      x-bardic-cost: none
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 60}
+      responses:
+        '200':
+          description: The device.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Device'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------ Listeners
+  /api/listeners:
+    get:
+      operationId: listListeners
+      tags: [Listeners]
+      summary: List listeners
+      description: Ordered by name. Includes `last_listened_at` so pickers can show recency.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Listeners.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ListenerList'}
+    post:
+      operationId: createListener
+      tags: [Listeners]
+      summary: Add a listener
+      description: |
+        Errors: `name_invalid` (400), `name_taken` (409). The first listener on a
+        fresh server is created the same way.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ListenerInput'}
+      responses:
+        '201':
+          description: The new listener.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Listener'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/listeners/{listener_id}:
+    parameters: [{$ref: '#/components/parameters/ListenerId'}]
+    get:
+      operationId: getListener
+      tags: [Listeners]
+      summary: Get a listener
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The listener.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Listener'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: renameListener
+      tags: [Listeners]
+      summary: Rename a listener
+      description: "Errors: `name_invalid` (400), `name_taken` (409)."
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ListenerInput'}
+      responses:
+        '200':
+          description: The listener.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Listener'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      operationId: deleteListener
+      tags: [Listeners]
+      summary: Delete a listener and their places
+      description: |
+        Deletes that listener's places, history, finished marks and settings only.
+        Books, audio, other listeners and audit records are kept. Errors:
+        `last_listener` (409).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '204': {description: "Deleted."}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/listeners/{listener_id}/impact:
+    parameters: [{$ref: '#/components/parameters/ListenerId'}]
+    get:
+      operationId: getListenerImpact
+      tags: [Listeners]
+      summary: What deleting a listener would remove
+      description: Used by the delete confirmation ("6 books started").
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [books_started, places, history_entries]
+                properties:
+                  books_started: {type: integer, minimum: 0}
+                  places: {type: integer, minimum: 0}
+                  history_entries: {type: integer, minimum: 0}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/listeners/{listener_id}/settings:
+    parameters: [{$ref: '#/components/parameters/ListenerId'}]
+    get:
+      operationId: getListenerSettings
+      tags: [Listeners]
+      summary: Get a listener's settings
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Settings.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ListenerSettings'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      operationId: putListenerSettings
+      tags: [Listeners]
+      summary: Replace a listener's settings
+      description: |
+        Errors: `voice_not_found` (404) if the default voice does not exist.
+        Setting a premium default voice is allowed; pressing play on a new book
+        then asks for a plan first (`plan_required`).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ListenerSettings'}
+      responses:
+        '200':
+          description: Settings.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ListenerSettings'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------ Library
+  /api/books:
+    get:
+      operationId: listBooks
+      tags: [Library]
+      summary: List books
+      description: |
+        Books not removed, with the requesting listener's place summary. Filters
+        combine with AND. `filter=on_device` is resolved by the client (the server
+        does not know what a device holds) and is therefore not a value here.
+      x-bardic-cost: none
+      parameters:
+        - {$ref: '#/components/parameters/Listener'}
+        - {name: q, in: query, schema: {type: string}, description: "Matches title, author and series name."}
+        - name: filter
+          in: query
+          schema: {type: string, enum: [all, in_progress, not_started, finished]}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [recent, title, author, added], default: recent}
+        - {name: include_removed, in: query, schema: {type: boolean, default: false}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/After'}
+      responses:
+        '200':
+          description: A page of books.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BookPage'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+  /api/books/duplicates:
+    get:
+      operationId: findDuplicateBooks
+      tags: [Library]
+      summary: Check a file against the library before uploading it
+      description: |
+        `sha256` is the lowercase hex SHA-256 of the file. Includes removed books.
+        Never blocks an import; it only informs.
+      x-bardic-cost: none
+      parameters:
+        - {name: sha256, in: query, required: true, schema: {type: string, pattern: '^[0-9a-f]{64}$'}}
+        - {name: title, in: query, schema: {type: string}}
+        - {name: author, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Matches.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DuplicateBooks'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+  /api/imports:
+    post:
+      operationId: createImport
+      tags: [Library]
+      summary: Add a book from a file
+      description: |
+        Multipart upload with one field, `file`: a DRM-free EPUB or UTF-8 text
+        file (default limit 30 MiB, see `getServer`). Returns 202 immediately with
+        an `Import`; progress is read with `getImport` or the event stream. The
+        book exists with state `adding` and becomes `readable` when its text is
+        stored. A failed import leaves no book. The server never contacts a
+        provider.
+        Errors (400): `import_drm_protected`, `import_unreadable`,
+        `import_unsupported_encoding`, `import_no_text`; 413: `import_too_large`.
+      x-bardic-cost: none
+      parameters:
+        - {$ref: '#/components/parameters/Device'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '202':
+          description: Accepted.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Import'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+  /api/imports/{import_id}:
+    parameters: [{$ref: '#/components/parameters/ImportId'}]
+    get:
+      operationId: getImport
+      tags: [Library]
+      summary: Read an import
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The import.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Import'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      operationId: cancelImport
+      tags: [Library]
+      summary: Cancel an import in progress
+      description: No effect, and 204, when it already finished.
+      x-bardic-cost: none
+      responses:
+        '204': {description: "Cancelled or already finished."}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/sample:
+    post:
+      operationId: createSampleBook
+      tags: [Library]
+      summary: Add the built-in sample book
+      description: Adds an original short story. Free, instant, contacts no provider.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '201':
+          description: The book.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Book'}
+  /api/books/{book_id}:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    get:
+      operationId: getBook
+      tags: [Library]
+      summary: Get a book
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}]
+      responses:
+        '200':
+          description: The book.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Book'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: updateBook
+      tags: [Library]
+      summary: Edit title, author or series
+      description: "Never changes text. Errors: `book_removed` (409)."
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BookUpdate'}
+      responses:
+        '200':
+          description: The book.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Book'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/books/{book_id}/cover:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    get:
+      operationId: getBookCover
+      tags: [Library]
+      summary: Cover image
+      description: |
+        The URL in `Book.cover.url` carries the image hash, so responses are
+        immutable and cacheable forever. 404 when the book has no cover.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: JPEG thumbnail.
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/cover/refresh:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    post:
+      operationId: refreshBookCover
+      tags: [Library]
+      summary: Re-read the cover from the original file
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The book.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Book'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/remove:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    post:
+      operationId: removeBook
+      tags: [Library]
+      summary: Remove a book from the library (reversible)
+      description: Keeps audio, places and downloads. Idempotent.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The book, state `removed`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Book'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/restore:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    post:
+      operationId: restoreBook
+      tags: [Library]
+      summary: Restore a removed book
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The book.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Book'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/series:
+    get:
+      operationId: listSeries
+      tags: [Library]
+      summary: Series with books and known gaps
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}]
+      responses:
+        '200':
+          description: Series.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Series'}
+  /api/books/{book_id}/chapters:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    get:
+      operationId: listChapters
+      tags: [Library]
+      summary: Chapters of a book, in reading order
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Chapters.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Chapter'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/chapters/{chapter_id}/text:
+    parameters:
+      - {$ref: '#/components/parameters/BookId'}
+      - {$ref: '#/components/parameters/ChapterId'}
+    get:
+      operationId: getChapterText
+      tags: [Library]
+      summary: Exact text and line boundaries of a chapter
+      description: |
+        `text` is the canonical, unchanged chapter text. Line `start` and `end`
+        are zero-based Unicode code point offsets into `text`, end exclusive;
+        they are not bytes or UTF-16 units. `text_sha256` identifies the text for
+        offline caches.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Text and lines.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChapterText'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/search:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    get:
+      operationId: searchBook
+      tags: [Library]
+      summary: Search the text of one book
+      description: Reads stored text only; sends nothing anywhere.
+      x-bardic-cost: none
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 1}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/After'}
+      responses:
+        '200':
+          description: Matches.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SearchPage'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------ Places
+  /api/books/{book_id}/place:
+    parameters:
+      - {$ref: '#/components/parameters/BookId'}
+      - {$ref: '#/components/parameters/Listener'}
+    get:
+      operationId: getPlace
+      tags: [Places]
+      summary: The requesting listener's place in a book
+      description: 404 `place_not_found` when the listener never opened the book.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The place.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Place'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      operationId: putPlace
+      tags: [Places]
+      summary: Write the place
+      description: |
+        Optimistic concurrency: send `base_revision`, the `revision` of the place
+        the client last read or wrote (0 if it has none). If the server's place is
+        newer and was written by another device, the response is 409
+        `place_conflict` whose body carries the server's place; the client then
+        applies the listener's conflict policy (see README) and writes again with
+        the server's revision. An identical write changes nothing and returns the
+        current place. Queued writes from offline use the same protocol.
+        Other errors: `chapter_not_found`, `offset_out_of_range` (400).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlaceInput'}
+      responses:
+        '200':
+          description: The stored place.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Place'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: The server has a newer place from another device.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlaceConflict'}
+    delete:
+      operationId: clearPlace
+      tags: [Places]
+      summary: Mark the book not started
+      description: Removes the current place and its history for this listener. Idempotent.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '204': {description: "Cleared."}
+  /api/books/{book_id}/place/finished:
+    parameters:
+      - {$ref: '#/components/parameters/BookId'}
+      - {$ref: '#/components/parameters/Listener'}
+    put:
+      operationId: setFinished
+      tags: [Places]
+      summary: Mark finished or reopen
+      description: |
+        `true` marks finished now (`reason: marked`), keeping the place, or
+        creating one at the end of the last story chapter. `false` reopens it and
+        restarts the automatic clock. A change of place clears a marked finish.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [finished]
+              properties:
+                finished: {type: boolean}
+      responses:
+        '200':
+          description: The place.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Place'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/place/history:
+    parameters:
+      - {$ref: '#/components/parameters/BookId'}
+      - {$ref: '#/components/parameters/Listener'}
+    get:
+      operationId: listPlaceHistory
+      tags: [Places]
+      summary: Earlier places, newest first (at most 10)
+      description: |
+        A previous place is kept when it was at least 30 minutes old or the new
+        place is a jump of 2% or more of the book. Restoring means writing an
+        entry's chapter and offset with `putPlace`.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: History.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 10
+                    items: {$ref: '#/components/schemas/Place'}
+
+  # ------------------------------------------------------------ Voices
+  /api/voice-sources:
+    get:
+      operationId: listVoiceSources
+      tags: [Voices]
+      summary: Sources of voices and their state
+      description: |
+        Always returns the three known kinds (`breeze`, `gemini`, `local`), set up
+        or not. `local` is `unavailable` when the computer has no usable voices.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Sources.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/VoiceSource'}
+  /api/voice-sources/{source_id}:
+    parameters: [{$ref: '#/components/parameters/SourceId'}]
+    get:
+      operationId: getVoiceSource
+      tags: [Voices]
+      summary: Get a source
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The source.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VoiceSource'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      operationId: configureVoiceSource
+      tags: [Voices]
+      summary: Set up or change a source
+      description: |
+        `breeze` needs `base_url`. `gemini` needs `api_key` (write-only: never
+        returned; omit to keep the stored key). `local` needs only `enabled`.
+        The server tests the new configuration before storing it and returns
+        `source_unreachable` or `key_rejected` (400) without storing on failure.
+      x-bardic-cost: network
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VoiceSourceConfig'}
+      responses:
+        '200':
+          description: The source.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VoiceSource'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      operationId: removeVoiceSource
+      tags: [Voices]
+      summary: Forget a source's configuration and key
+      description: Audio already made with its voices is kept and stays playable.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '204': {description: "Removed."}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/voice-sources/{source_id}/test:
+    parameters: [{$ref: '#/components/parameters/SourceId'}]
+    post:
+      operationId: testVoiceSource
+      tags: [Voices]
+      summary: Check that a source works now
+      description: Reads the voice list only. Never speaks, never spends.
+      x-bardic-cost: network
+      responses:
+        '200':
+          description: Result; the source state is updated too.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VoiceSource'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/voice-sources/{source_id}/refresh:
+    parameters: [{$ref: '#/components/parameters/SourceId'}]
+    post:
+      operationId: refreshVoiceSource
+      tags: [Voices]
+      summary: Re-read a source's voices
+      description: |
+        Also done automatically when a voice screen opens (clients call this) and
+        once a day by the server. If the source is unreachable the last known
+        voices stay listed with `available: false`.
+      x-bardic-cost: network
+      responses:
+        '200':
+          description: The source.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VoiceSource'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/voices:
+    get:
+      operationId: listVoices
+      tags: [Voices]
+      summary: Voices across sources
+      x-bardic-cost: none
+      parameters:
+        - {name: source_id, in: query, schema: {type: string}}
+        - {name: tier, in: query, schema: {$ref: '#/components/schemas/Tier'}}
+        - {name: language, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Voices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Voice'}
+  /api/voices/{voice_id}/sample:
+    parameters: [{$ref: '#/components/parameters/VoiceId'}]
+    get:
+      operationId: getVoiceSample
+      tags: [Voices]
+      summary: A short audible sample
+      description: |
+        Free voices cost nothing. A premium sample is a short real request: it
+        counts toward spending and is cached per voice revision, so a repeat is
+        free. Errors: `source_not_set_up` (409), `key_rejected` (409),
+        `provider_quota` (429).
+      x-bardic-cost: may_charge
+      responses:
+        '200':
+          description: Audio.
+          content:
+            audio/*:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+
+  # ------------------------------------------------------------ Audiobooks
+  /api/books/{book_id}/audiobooks:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    get:
+      operationId: listAudiobooks
+      tags: [Audiobooks]
+      summary: Audiobooks of a book
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Audiobooks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Audiobook'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: createAudiobook
+      tags: [Audiobooks]
+      summary: Create (or open) the audiobook for a voice
+      description: |
+        Creating an audiobook is free and spends nothing; it makes no audio. For a
+        voice at a given revision there is at most one audiobook per book; a repeat
+        returns the existing one (200). Errors: `voice_not_found` (404),
+        `book_removed` (409).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voice_id]
+              properties:
+                voice_id: {type: string}
+      responses:
+        '200':
+          description: Existing audiobook.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Audiobook'}
+        '201':
+          description: New audiobook.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Audiobook'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/audiobooks/{audiobook_id}:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    get:
+      operationId: getAudiobook
+      tags: [Audiobooks]
+      summary: Get an audiobook
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The audiobook.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Audiobook'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/audiobooks/{audiobook_id}/chapters:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    get:
+      operationId: listAudiobookChapters
+      tags: [Audiobooks]
+      summary: Audio state of every chapter
+      description: One word per chapter (`not_yet`, `making`, `ready`); reasons are details.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Chapters in reading order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/AudiobookChapter'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/audiobooks/{audiobook_id}/chapters/{chapter_id}/request:
+    parameters:
+      - {$ref: '#/components/parameters/AudiobookId'}
+      - {$ref: '#/components/parameters/ChapterId'}
+    post:
+      operationId: requestChapterAudio
+      tags: [Audiobooks]
+      summary: Make a chapter now (press play)
+      description: |
+        Free voices: returns the chapter if ready, otherwise starts or joins a job
+        with the chapter at the front of the queue (202). Premium voices: spends
+        only if the chapter is covered by an approved, running plan for this
+        audiobook; otherwise 409 `plan_required`. Joins an already running job
+        for the same chapter. Errors: `source_not_set_up`, `source_unreachable`,
+        `plan_required`, `allowance_exceeded`, `limit_exceeded` (409).
+      x-bardic-cost: may_charge
+      parameters:
+        - {$ref: '#/components/parameters/Listener'}
+        - {$ref: '#/components/parameters/Device'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ahead: {type: integer, minimum: 0, maximum: 5, default: 1, description: "Also queue this many following chapters behind it."}
+      responses:
+        '200':
+          description: Already ready.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AudiobookChapter'}
+        '202':
+          description: A job is making it.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/audiobooks/{audiobook_id}/make-ready:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    post:
+      operationId: makeAudiobookReady
+      tags: [Audiobooks]
+      summary: Make a free audiobook ready in the background
+      description: |
+        For free voices only. Creates a job for the scope. For a premium voice
+        this is always 409 `plan_required`; use `previewPlan` and `createPlan`.
+      x-bardic-cost: none
+      parameters:
+        - {$ref: '#/components/parameters/Listener'}
+        - {$ref: '#/components/parameters/Device'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope]
+              properties:
+                scope: {$ref: '#/components/schemas/Scope'}
+      responses:
+        '202':
+          description: Job started or joined.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/audiobooks/{audiobook_id}/space:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    get:
+      operationId: getAudiobookSpace
+      tags: [Audiobooks]
+      summary: Space used by an audiobook and what re-making would cost
+      description: Drives the free-up-space sheet. Read-only.
+      x-bardic-cost: network
+      responses:
+        '200':
+          description: Usage.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AudiobookSpace'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      operationId: freeAudiobookSpace
+      tags: [Audiobooks]
+      summary: Delete an audiobook's regenerable audio
+      description: |
+        Deletes audio on the server; keeps the book, places, plans, audit and
+        downloads on devices. Returns the freed bytes. Refuses while a job is
+        running for it (409 `job_running`).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: Result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [freed_bytes]
+                properties:
+                  freed_bytes: {type: integer, minimum: 0}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/audio/{audio_id}:
+    parameters: [{$ref: '#/components/parameters/AudioId'}]
+    get:
+      operationId: getAudio
+      tags: [Audiobooks]
+      summary: Audio bytes
+      description: |
+        Supports `Range`. The id names the exact bytes, so responses are
+        immutable (`Cache-Control: public, max-age=31536000, immutable`) and the
+        ETag is the id.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Whole audio.
+          content:
+            audio/*:
+              schema: {type: string, format: binary}
+        '206':
+          description: Partial audio.
+          content:
+            audio/*:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '416': {description: "Range not satisfiable."}
+  /api/audio/{audio_id}/timings:
+    parameters: [{$ref: '#/components/parameters/AudioId'}]
+    get:
+      operationId: getAudioTimings
+      tags: [Audiobooks]
+      summary: When each line is spoken
+      description: Drives read-along highlighting. Immutable like the audio.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Timings.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AudioTimings'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------ Plans
+  /api/audiobooks/{audiobook_id}/plan-preview:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    post:
+      operationId: previewPlan
+      tags: [Plans]
+      summary: Price a plan without starting it
+      description: |
+        Returns an estimate as a range, the default limit, the Allowance position
+        and an `estimate_id` valid for 15 minutes. Refreshes provider prices if
+        they are stale. Spends nothing. When a monthly limit is set and the low
+        end exceeds what is left, `blocked` explains and the plan cannot be
+        approved. Errors: `source_not_set_up`, `key_rejected` (409).
+      x-bardic-cost: network
+      parameters: [{$ref: '#/components/parameters/Listener'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope]
+              properties:
+                scope: {$ref: '#/components/schemas/Scope'}
+      responses:
+        '200':
+          description: The estimate.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlanEstimate'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/plans:
+    get:
+      operationId: listPlans
+      tags: [Plans]
+      summary: Plans
+      x-bardic-cost: none
+      parameters:
+        - {name: book_id, in: query, schema: {type: string}}
+        - {name: audiobook_id, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {$ref: '#/components/schemas/PlanState'}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/After'}
+      responses:
+        '200':
+          description: A page of plans, newest first.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlanPage'}
+    post:
+      operationId: createPlan
+      tags: [Plans]
+      summary: Approve a plan and start it
+      description: |
+        The approval. Needs the `estimate_id` from `previewPlan` and the `limit`
+        the listener accepted, so what was shown is what is approved. Creates a
+        plan and its job. Errors (409): `estimate_expired`, `estimate_changed`
+        (prices moved past the stated range; preview again),
+        `allowance_exceeded`, `limit_below_estimate`, `key_rejected`,
+        `source_not_set_up`. Records listener and device.
+      x-bardic-cost: may_charge
+      parameters:
+        - {$ref: '#/components/parameters/Listener'}
+        - {$ref: '#/components/parameters/Device'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanApproval'}
+      responses:
+        '201':
+          description: The plan, `running`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Plan'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/plans/{plan_id}:
+    parameters: [{$ref: '#/components/parameters/PlanId'}]
+    get:
+      operationId: getPlan
+      tags: [Plans]
+      summary: Get a plan
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The plan.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Plan'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/plans/{plan_id}/pause:
+    parameters: [{$ref: '#/components/parameters/PlanId'}]
+    post:
+      operationId: pausePlan
+      tags: [Plans]
+      summary: Pause at the next chapter boundary
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The plan.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Plan'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/plans/{plan_id}/resume:
+    parameters: [{$ref: '#/components/parameters/PlanId'}]
+    post:
+      operationId: resumePlan
+      tags: [Plans]
+      summary: Continue a paused or needs-you plan
+      description: |
+        Continues inside the plan's current limit. To raise the limit send
+        `new_limit`; that is an approval and is audited. A plan waiting on a
+        provider quota resumes by itself and needs no call. Errors (409):
+        `allowance_exceeded`, `limit_exceeded` (raise the limit), `key_rejected`.
+      x-bardic-cost: may_charge
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                new_limit: {$ref: '#/components/schemas/Money'}
+      responses:
+        '200':
+          description: The plan.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Plan'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/plans/{plan_id}/stop:
+    parameters: [{$ref: '#/components/parameters/PlanId'}]
+    post:
+      operationId: stopPlan
+      tags: [Plans]
+      summary: Stop a plan, keeping finished chapters
+      description: Idempotent.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The plan, `stopped`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Plan'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/allowance:
+    get:
+      operationId: getAllowance
+      tags: [Plans]
+      summary: Allowance and this month's spending
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The allowance.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Allowance'}
+    put:
+      operationId: putAllowance
+      tags: [Plans]
+      summary: Set the monthly limit and the default plan limit
+      description: |
+        `monthly_limit: null` means no monthly limit (the default). Setting a
+        limit below current spending is allowed: it blocks new plans and stops
+        running plans at their next chapter boundary. Turning it off never
+        changes a running plan's own limit. Audited.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AllowanceInput'}
+      responses:
+        '200':
+          description: The allowance.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Allowance'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+  /api/prices:
+    get:
+      operationId: listPrices
+      tags: [Plans]
+      summary: Prices the server is using, with their dates
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Prices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Price'}
+    post:
+      operationId: refreshPrices
+      tags: [Plans]
+      summary: Refresh prices now
+      description: |
+        Reads the provider's price interface (for Google, the Cloud Billing
+        Catalog) and stores the result with its date. Also runs daily and
+        whenever usage is fetched. A failure keeps the last prices and reports
+        their age in `Price.refresh_error`.
+      x-bardic-cost: network
+      responses:
+        '200':
+          description: Prices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Price'}
+  /api/prices/{provider}:
+    parameters:
+      - {name: provider, in: path, required: true, schema: {type: string}}
+    put:
+      operationId: putPriceTable
+      tags: [Plans]
+      summary: Set a manual price table for a provider
+      description: |
+        Fallback for providers without a price interface. Estimates using it are
+        labelled `basis: manual`. Audited.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PriceTable'}
+      responses:
+        '200':
+          description: The price.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Price'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+
+  # ------------------------------------------------------------ Jobs
+  /api/jobs:
+    get:
+      operationId: listJobs
+      tags: [Jobs]
+      summary: Jobs
+      x-bardic-cost: none
+      parameters:
+        - {name: book_id, in: query, schema: {type: string}}
+        - {name: audiobook_id, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {$ref: '#/components/schemas/JobState'}}
+        - {name: active, in: query, schema: {type: boolean}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/After'}
+      responses:
+        '200':
+          description: A page of jobs, newest first.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/JobPage'}
+  /api/jobs/{job_id}:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    get:
+      operationId: getJob
+      tags: [Jobs]
+      summary: Get a job
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/jobs/{job_id}/pause:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    post:
+      operationId: pauseJob
+      tags: [Jobs]
+      summary: Pause a free-voice job
+      description: A job belonging to a plan is paused with `pausePlan` (409 otherwise).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/jobs/{job_id}/resume:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    post:
+      operationId: resumeJob
+      tags: [Jobs]
+      summary: Resume a free-voice job
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/jobs/{job_id}/cancel:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    post:
+      operationId: cancelJob
+      tags: [Jobs]
+      summary: Stop a job, keeping finished chapters
+      description: Idempotent. For a plan's job this is the same as `stopPlan`.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------ Offline
+  /api/audiobooks/{audiobook_id}/manifest:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    get:
+      operationId: getAudiobookManifest
+      tags: [Offline]
+      summary: Everything a device needs to download an audiobook
+      description: |
+        For every ready chapter: audio id, size, hash, duration, the timings id
+        and the text hash. Clients download `getAudio`, `getAudioTimings` and
+        `getChapterText` for the chapters they choose.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Manifest.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Manifest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/audiobooks/{audiobook_id}/sync-check:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    post:
+      operationId: checkDownloads
+      tags: [Offline]
+      summary: Which downloaded chapters are out of date
+      description: |
+        The device sends what it holds. For every chapter whose audio has been
+        made again, the response says what changed, so the client can show the
+        comparison and let the listener decide. Read-only; nothing is replaced.
+      x-bardic-cost: none
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [have]
+              properties:
+                have:
+                  type: array
+                  items:
+                    type: object
+                    required: [chapter_id, audio_id]
+                    properties:
+                      chapter_id: {type: string}
+                      audio_id: {type: string}
+      responses:
+        '200':
+          description: Result.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SyncCheck'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  # ------------------------------------------------------------ Admin
+  /api/books/{book_id}/deletion:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    get:
+      operationId: getBookDeletion
+      tags: [Admin]
+      summary: Is this book scheduled for permanent deletion
+      description: 404 `deletion_not_found` when none is scheduled.
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The schedule.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Deletion'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: scheduleBookDeletion
+      tags: [Admin]
+      summary: Permanently delete a book in 60 seconds
+      description: |
+        Hides the book immediately and schedules irreversible deletion of the
+        book, its audio, places, history and plans `delay_seconds` later (default
+        and minimum 60). The schedule is stored and survives restarts. Cancel with
+        `cancelBookDeletion`. Audited.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                delay_seconds: {type: integer, minimum: 60, default: 60}
+      responses:
+        '202':
+          description: Scheduled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Deletion'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      operationId: cancelBookDeletion
+      tags: [Admin]
+      summary: Undo a scheduled deletion
+      description: The book returns exactly as it was. 409 `deletion_done` once it ran.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
+      responses:
+        '204': {description: "Cancelled."}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/audiobooks/{audiobook_id}/exports:
+    parameters: [{$ref: '#/components/parameters/AudiobookId'}]
+    post:
+      operationId: createExport
+      tags: [Admin]
+      summary: Export an audiobook as one audio file with chapters
+      description: |
+        Starts a job that encodes the ready chapters into one M4B with chapter
+        markers. Refuses if no chapter is ready (409 `nothing_ready`).
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                format: {type: string, enum: [m4b], default: m4b}
+      responses:
+        '202':
+          description: The export.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Export'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/exports/{export_id}:
+    parameters:
+      - {name: export_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getExport
+      tags: [Admin]
+      summary: Read an export
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The export.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Export'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/exports/{export_id}/file:
+    parameters:
+      - {name: export_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: downloadExport
+      tags: [Admin]
+      summary: Download the exported file
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: The file.
+          content:
+            audio/mp4:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/backups:
+    get:
+      operationId: listBackups
+      tags: [Admin]
+      summary: Backups made by this server
+      x-bardic-cost: none
+      responses:
+        '200':
+          description: Backups.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Backup'}
+    post:
+      operationId: createBackup
+      tags: [Admin]
+      summary: Make a consistent backup while running
+      description: |
+        Writes a point-in-time copy of the database and audio index to the
+        server's backup folder. Audio files are immutable and referenced, not
+        copied twice. Returns a job-like `Backup`.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '202':
+          description: Started.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Backup'}
+  /api/audit:
+    get:
+      operationId: listAudit
+      tags: [Admin]
+      summary: Who did what, from which device
+      description: |
+        Append-only. Covers listeners, plans, Allowance, keys and sources, prices,
+        deletions and exports.
+      x-bardic-cost: none
+      parameters:
+        - {name: listener_id, in: query, schema: {type: string}}
+        - {name: action, in: query, schema: {type: string}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/After'}
+      responses:
+        '200':
+          description: A page of records, newest first.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPage'}
+
+components:
+  parameters:
+    Listener:
+      name: X-Bardic-Listener
+      in: header
+      required: true
+      description: Id of the listener acting. Scopes places and settings; unknown id is 404 `listener_not_found`.
+      schema: {type: string}
+    Device:
+      name: X-Bardic-Device
+      in: header
+      required: true
+      description: Client-generated device id (UUID). Registers the device on first use and is recorded in the audit log.
+      schema: {type: string}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: A retry with the same key and body returns the first result instead of acting twice.
+      schema: {type: string, maxLength: 80}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+    After:
+      name: after
+      in: query
+      description: Opaque cursor from a previous page's `next`.
+      schema: {type: string}
+    ListenerId: {name: listener_id, in: path, required: true, schema: {type: string}}
+    DeviceId: {name: device_id, in: path, required: true, schema: {type: string}}
+    BookId: {name: book_id, in: path, required: true, schema: {type: string}}
+    ChapterId: {name: chapter_id, in: path, required: true, schema: {type: string}}
+    ImportId: {name: import_id, in: path, required: true, schema: {type: string}}
+    SourceId: {name: source_id, in: path, required: true, schema: {type: string}}
+    VoiceId: {name: voice_id, in: path, required: true, schema: {type: string}}
+    AudiobookId: {name: audiobook_id, in: path, required: true, schema: {type: string}}
+    AudioId: {name: audio_id, in: path, required: true, schema: {type: string}}
+    PlanId: {name: plan_id, in: path, required: true, schema: {type: string}}
+    JobId: {name: job_id, in: path, required: true, schema: {type: string}}
+
+  responses:
+    InvalidRequest:
+      description: The request is malformed or breaks a rule; `code` says which.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: The resource does not exist (or is not visible to this listener).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: The request conflicts with current state; `code` says how.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    TooLarge:
+      description: The upload is larger than the server allows.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    RateLimited:
+      description: A provider or server limit applies; `retry_after_seconds` says when, if known.
+      headers:
+        Retry-After: {schema: {type: integer}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+
+  schemas:
+    # ---- shared
+    Error:
+      type: object
+      required: [code, detail]
+      properties:
+        code: {type: string, description: "Stable machine-readable code (open enumeration); see README."}
+        detail: {type: string, description: "Human-readable, safe to show."}
+        retryable: {type: boolean}
+        retry_after_seconds: {type: [integer, 'null']}
+        context:
+          type: object
+          additionalProperties: true
+          description: Code-specific fields (for example `plan_id`, `existing_book_id`).
+    Money:
+      type: object
+      required: [micros, currency]
+      properties:
+        micros: {type: integer, description: "Millionths of the currency unit. Never a float."}
+        currency: {type: string, pattern: '^[A-Z]{3}$', examples: [USD]}
+    Tier: {type: string, enum: [free, premium]}
+    Scope:
+      type: object
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [whole_book, from_chapter, chapters]}
+        from_chapter_id: {type: [string, 'null']}
+        chapter_ids:
+          type: array
+          items: {type: string}
+    Health:
+      type: object
+      required: [ok, time]
+      properties:
+        ok: {type: boolean}
+        time: {type: string, format: date-time}
+    Server:
+      type: object
+      required: [id, name, version, api_version, max_upload_bytes, free_bytes, time]
+      properties:
+        id: {type: string, description: "Stable id of this server's data folder."}
+        name: {type: string}
+        version: {type: string}
+        api_version: {type: string}
+        max_upload_bytes: {type: integer}
+        free_bytes: {type: [integer, 'null'], description: "Free space on the data volume; null if unknown."}
+        time: {type: string, format: date-time}
+    Device:
+      type: object
+      required: [id, name, first_seen_at, last_seen_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        first_seen_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time}
+    DeviceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Device'}
+    Notice:
+      type: object
+      required: [type, at]
+      description: |
+        A change notice. `type` is an open enumeration; current values:
+        `book.updated`, `import.updated`, `place.updated`, `audiobook.updated`,
+        `chapter.updated`, `job.updated`, `plan.updated`, `allowance.updated`,
+        `source.updated`, `listener.updated`, `deletion.updated`, `resync`.
+        Only ids are carried; re-read the resource.
+      properties:
+        type: {type: string}
+        at: {type: string, format: date-time}
+        book_id: {type: [string, 'null']}
+        id: {type: [string, 'null']}
+        listener_id: {type: [string, 'null'], description: "Set on listener-scoped notices (places); clients ignore others."}
+
+    # ---- listeners
+    ListenerInput:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 40, description: "Unique ignoring case."}
+    Listener:
+      type: object
+      required: [id, name, created_at, last_listened_at, books_started]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+        last_listened_at: {type: [string, 'null'], format: date-time}
+        books_started: {type: integer, minimum: 0}
+    ListenerList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Listener'}
+    ListenerSettings:
+      type: object
+      required: [default_voice_id, place_conflict, continue_into_next_chapter]
+      properties:
+        default_voice_id: {type: [string, 'null']}
+        place_conflict:
+          type: string
+          enum: [ask, newest, this_device]
+          description: What a client does when its place and the server's differ.
+        continue_into_next_chapter: {type: boolean}
+
+    # ---- library
+    Cover:
+      type: object
+      required: [url, sha256, width, height]
+      properties:
+        url: {type: string, description: "Root-relative; contains the hash so it is immutable."}
+        sha256: {type: string}
+        width: {type: integer}
+        height: {type: integer}
+        sample:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ColorSample'
+    ColorSample:
+      type: object
+      required: [hex, hue, saturation, lightness, vivid, version]
+      description: Dominant colour measured once from the thumbnail; the client derives the theme.
+      properties:
+        hex: {type: string, pattern: '^#[0-9a-f]{6}$'}
+        hue: {type: number, minimum: 0, maximum: 360}
+        saturation: {type: number, minimum: 0, maximum: 1}
+        lightness: {type: number, minimum: 0, maximum: 1}
+        vivid: {type: boolean, description: "False for near-grey covers; clients use the default palette."}
+        version: {type: integer}
+    SeriesRef:
+      type: object
+      required: [name, order]
+      properties:
+        name: {type: string}
+        order: {type: [number, 'null'], description: "Volume number; may be fractional."}
+    BookState: {type: string, enum: [adding, readable, removed, deleting]}
+    Book:
+      type: object
+      required: [id, title, author, state, added_at, series, cover, chapter_count, word_count, source_sha256, place]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        author: {type: string}
+        state: {$ref: '#/components/schemas/BookState'}
+        added_at: {type: string, format: date-time}
+        series:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/SeriesRef'
+        cover:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Cover'
+        chapter_count: {type: integer, description: "Story chapters only."}
+        word_count: {type: integer}
+        source_sha256: {type: [string, 'null']}
+        place:
+          description: The requesting listener's place summary; null if never opened.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/PlaceSummary'
+        audiobook_count: {type: integer, minimum: 0}
+    BookUpdate:
+      type: object
+      properties:
+        title: {type: string, minLength: 1}
+        author: {type: string}
+        series:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/SeriesRef'
+    BookPage:
+      type: object
+      required: [items, next]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Book'}
+        next: {type: [string, 'null']}
+    Series:
+      type: object
+      required: [name, books, missing_orders]
+      properties:
+        name: {type: string}
+        books:
+          type: array
+          items: {$ref: '#/components/schemas/Book'}
+        missing_orders:
+          type: array
+          items: {type: number}
+          description: Volume numbers between known volumes that are not in the library.
+    DuplicateBook:
+      type: object
+      required: [book_id, title, author, added_at, state]
+      properties:
+        book_id: {type: string}
+        title: {type: string}
+        author: {type: string}
+        added_at: {type: string, format: date-time}
+        state: {$ref: '#/components/schemas/BookState'}
+        cover:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Cover'
+    DuplicateBooks:
+      type: object
+      required: [exact, similar]
+      properties:
+        exact:
+          type: array
+          items: {$ref: '#/components/schemas/DuplicateBook'}
+        similar:
+          type: array
+          items: {$ref: '#/components/schemas/DuplicateBook'}
+    ImportState: {type: string, enum: [queued, reading, finding_chapters, preparing_text, done, failed, cancelled]}
+    Import:
+      type: object
+      required: [id, state, file_name, created_at, book_id, error]
+      properties:
+        id: {type: string}
+        state: {$ref: '#/components/schemas/ImportState'}
+        file_name: {type: string}
+        created_at: {type: string, format: date-time}
+        progress: {type: number, minimum: 0, maximum: 1}
+        book_id: {type: [string, 'null']}
+        error:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Error'
+    Chapter:
+      type: object
+      required: [id, index, title, kind, word_count, text_sha256]
+      properties:
+        id: {type: string}
+        index: {type: integer, minimum: 0}
+        title: {type: string}
+        kind: {type: string, enum: [story, front_matter, back_matter]}
+        word_count: {type: integer}
+        text_sha256: {type: string}
+    Line:
+      type: object
+      required: [id, start, end]
+      properties:
+        id: {type: string}
+        start: {type: integer, minimum: 0, description: "Code point offset, inclusive."}
+        end: {type: integer, minimum: 0, description: "Code point offset, exclusive."}
+    ChapterText:
+      type: object
+      required: [chapter_id, text, text_sha256, lines]
+      properties:
+        chapter_id: {type: string}
+        text: {type: string}
+        text_sha256: {type: string}
+        lines:
+          type: array
+          items: {$ref: '#/components/schemas/Line'}
+    SearchHit:
+      type: object
+      required: [chapter_id, line_id, start, end, before, match, after]
+      properties:
+        chapter_id: {type: string}
+        line_id: {type: string}
+        start: {type: integer}
+        end: {type: integer}
+        before: {type: string}
+        match: {type: string}
+        after: {type: string}
+    SearchPage:
+      type: object
+      required: [items, total, next]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/SearchHit'}
+        total: {type: integer}
+        next: {type: [string, 'null']}
+
+    # ---- places
+    FinishedState:
+      type: object
+      required: [finished, since, reason]
+      properties:
+        finished: {type: boolean}
+        since: {type: [string, 'null'], format: date-time}
+        reason: {type: [string, 'null'], enum: [marked, reached_end, null]}
+    PlaceSummary:
+      type: object
+      required: [chapter_id, progress, finished, updated_at]
+      properties:
+        chapter_id: {type: string}
+        progress: {type: number, minimum: 0, maximum: 1}
+        finished: {type: boolean}
+        updated_at: {type: string, format: date-time}
+    Place:
+      type: object
+      required: [book_id, chapter_id, offset, progress, mode, audiobook_id, device_id, revision, updated_at, finished]
+      properties:
+        book_id: {type: string}
+        chapter_id: {type: string}
+        offset: {type: integer, minimum: 0, description: "Code point offset into the chapter text."}
+        progress: {type: number, minimum: 0, maximum: 1, description: "Share of story text before the place."}
+        mode: {type: string, enum: [listening, reading]}
+        audiobook_id: {type: [string, 'null'], description: "The audiobook in use; null when only reading."}
+        device_id: {type: string}
+        device_name: {type: string}
+        revision: {type: integer, minimum: 1, description: "Increases on every change."}
+        updated_at: {type: string, format: date-time}
+        finished: {$ref: '#/components/schemas/FinishedState'}
+    PlaceInput:
+      type: object
+      required: [chapter_id, offset, mode, base_revision]
+      properties:
+        chapter_id: {type: string}
+        offset: {type: integer, minimum: 0}
+        mode: {type: string, enum: [listening, reading]}
+        audiobook_id: {type: [string, 'null']}
+        base_revision: {type: integer, minimum: 0}
+    PlaceConflict:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [server_place]
+          properties:
+            server_place: {$ref: '#/components/schemas/Place'}
+
+    # ---- voices
+    VoiceSourceKind: {type: string, enum: [breeze, gemini, local]}
+    VoiceSourceState: {type: string, enum: [not_set_up, connected, unreachable, key_rejected, available, unavailable]}
+    VoiceSource:
+      type: object
+      required: [id, kind, name, tier, state, voice_count, checked_at, detail]
+      properties:
+        id: {type: string}
+        kind: {$ref: '#/components/schemas/VoiceSourceKind'}
+        name: {type: string}
+        tier: {$ref: '#/components/schemas/Tier'}
+        state: {$ref: '#/components/schemas/VoiceSourceState'}
+        voice_count: {type: integer}
+        checked_at: {type: [string, 'null'], format: date-time}
+        detail: {type: [string, 'null'], description: "Safe to show; never contains a key."}
+        base_url: {type: [string, 'null'], description: "Breeze only."}
+        has_key: {type: boolean, description: "Gemini only; true when a key is stored."}
+    VoiceSourceConfig:
+      type: object
+      properties:
+        base_url: {type: string, format: uri}
+        api_key: {type: string, writeOnly: true}
+        enabled: {type: boolean}
+    Voice:
+      type: object
+      required: [id, source_id, name, tier, language, description, revision, available]
+      properties:
+        id: {type: string}
+        source_id: {type: string}
+        name: {type: string}
+        tier: {$ref: '#/components/schemas/Tier'}
+        language: {type: string}
+        description: {type: string}
+        revision: {type: string, description: "Changes when the source changes how it sounds."}
+        available: {type: boolean}
+
+    # ---- audiobooks
+    Audiobook:
+      type: object
+      required: [id, book_id, voice_id, voice_name, source_id, tier, voice_revision, chapters_total, chapters_ready, bytes, created_at, active_job_id]
+      properties:
+        id: {type: string}
+        book_id: {type: string}
+        voice_id: {type: string}
+        voice_name: {type: string}
+        source_id: {type: string}
+        tier: {$ref: '#/components/schemas/Tier'}
+        voice_revision: {type: string}
+        chapters_total: {type: integer}
+        chapters_ready: {type: integer}
+        bytes: {type: integer}
+        created_at: {type: string, format: date-time}
+        active_job_id: {type: [string, 'null']}
+    AudioWord: {type: string, enum: [not_yet, making, ready]}
+    AudioRef:
+      type: object
+      required: [id, duration_seconds, bytes, sha256, content_type, voice_revision]
+      properties:
+        id: {type: string}
+        duration_seconds: {type: number}
+        bytes: {type: integer}
+        sha256: {type: string}
+        content_type: {type: string}
+        voice_revision: {type: string}
+        url: {type: string}
+        timings_url: {type: string}
+    AudiobookChapter:
+      type: object
+      required: [chapter_id, state, audio, newer_audio, detail]
+      properties:
+        chapter_id: {type: string}
+        state: {$ref: '#/components/schemas/AudioWord'}
+        audio:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/AudioRef'
+        newer_audio:
+          description: Set when the chapter was made again with a newer voice revision.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/AudioRef'
+        detail:
+          description: Why it is not_yet or making, when useful (for example waiting for a quota).
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Detail'
+    Detail:
+      type: object
+      required: [code, text]
+      properties:
+        code: {type: string, description: 'Open enumeration, e.g. `waiting_quota`, `provider_refused`, `failed_retry`.'}
+        text: {type: string}
+        until: {type: [string, 'null'], format: date-time}
+    AudiobookSpace:
+      type: object
+      required: [audiobook_id, bytes, chapters, remake_estimate]
+      properties:
+        audiobook_id: {type: string}
+        bytes: {type: integer}
+        chapters: {type: integer}
+        remake_estimate:
+          description: What making it again would cost; null for free voices.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/CostEstimate'
+    AudioTimings:
+      type: object
+      required: [audio_id, lines]
+      properties:
+        audio_id: {type: string}
+        lines:
+          type: array
+          items:
+            type: object
+            required: [line_id, start_ms, end_ms]
+            properties:
+              line_id: {type: string}
+              start_ms: {type: integer, minimum: 0}
+              end_ms: {type: integer, minimum: 0}
+
+    # ---- plans and money
+    Spend:
+      type: object
+      required: [known, unknown_items]
+      properties:
+        known: {$ref: '#/components/schemas/Money'}
+        unknown_items: {type: integer, minimum: 0, description: "Items whose cost could not be determined. Never counted as zero."}
+    CostEstimate:
+      type: object
+      required: [low, likely, high, prices_as_of, basis]
+      properties:
+        low: {$ref: '#/components/schemas/Money'}
+        likely: {$ref: '#/components/schemas/Money'}
+        high: {$ref: '#/components/schemas/Money'}
+        prices_as_of: {type: string, format: date-time}
+        basis: {type: string, enum: [provider, manual, unknown], description: "Where the price came from; `unknown` means no range can be given."}
+    PlanEstimate:
+      type: object
+      required: [estimate_id, expires_at, audiobook_id, scope, text_characters, chapters_to_make, chapters_reused, seconds_estimate, cost, suggested_limit, allowance, blocked]
+      properties:
+        estimate_id: {type: string}
+        expires_at: {type: string, format: date-time}
+        audiobook_id: {type: string}
+        scope: {$ref: '#/components/schemas/Scope'}
+        text_characters: {type: integer}
+        chapters_to_make: {type: integer}
+        chapters_reused: {type: integer}
+        seconds_estimate: {type: [integer, 'null']}
+        cost: {$ref: '#/components/schemas/CostEstimate'}
+        suggested_limit: {$ref: '#/components/schemas/Money'}
+        allowance: {$ref: '#/components/schemas/AllowancePosition'}
+        blocked:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Detail'
+    PlanApproval:
+      type: object
+      required: [estimate_id, limit]
+      properties:
+        estimate_id: {type: string}
+        limit: {$ref: '#/components/schemas/Money'}
+    PlanState: {type: string, enum: [approved, running, waiting, paused, needs_you, completed, stopped, failed]}
+    Plan:
+      type: object
+      required: [id, audiobook_id, book_id, scope, state, estimate, limit, spent, job_id, chapters_total, chapters_done, waiting, needs_you, approved_by, created_at, updated_at]
+      properties:
+        id: {type: string}
+        audiobook_id: {type: string}
+        book_id: {type: string}
+        scope: {$ref: '#/components/schemas/Scope'}
+        state: {$ref: '#/components/schemas/PlanState'}
+        estimate: {$ref: '#/components/schemas/CostEstimate'}
+        limit: {$ref: '#/components/schemas/Money'}
+        spent: {$ref: '#/components/schemas/Spend'}
+        job_id: {type: [string, 'null']}
+        chapters_total: {type: integer}
+        chapters_done: {type: integer}
+        waiting:
+          description: Set in state `waiting`. Resumes by itself, inside the original limit.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Detail'
+        needs_you:
+          description: Set in state `needs_you` (limit, Allowance, key, repeated failure, refusal).
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Detail'
+        approved_by: {$ref: '#/components/schemas/Actor'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    PlanPage:
+      type: object
+      required: [items, next]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Plan'}
+        next: {type: [string, 'null']}
+    Actor:
+      type: object
+      required: [listener_id, listener_name, device_id, device_name]
+      properties:
+        listener_id: {type: string}
+        listener_name: {type: string}
+        device_id: {type: string}
+        device_name: {type: string}
+    AllowancePosition:
+      type: object
+      required: [monthly_limit, remaining]
+      properties:
+        monthly_limit:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Money'
+        remaining:
+          description: Null when there is no monthly limit.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Money'
+    Allowance:
+      type: object
+      required: [monthly_limit, default_plan_limit, period_start, period_end, spent, currency]
+      properties:
+        monthly_limit:
+          description: Null means no monthly limit (the default).
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Money'
+        default_plan_limit: {$ref: '#/components/schemas/Money'}
+        period_start: {type: string, format: date-time}
+        period_end: {type: string, format: date-time}
+        spent: {$ref: '#/components/schemas/Spend'}
+        currency: {type: string}
+    AllowanceInput:
+      type: object
+      required: [monthly_limit, default_plan_limit]
+      properties:
+        monthly_limit:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Money'
+        default_plan_limit: {$ref: '#/components/schemas/Money'}
+    Price:
+      type: object
+      required: [provider, unit, per_unit, as_of, basis, refresh_error]
+      properties:
+        provider: {type: string}
+        unit: {type: string, examples: [million_characters]}
+        per_unit: {$ref: '#/components/schemas/Money'}
+        as_of: {type: string, format: date-time}
+        basis: {type: string, enum: [provider, manual]}
+        refresh_error: {type: [string, 'null'], description: "Set when the last refresh failed; the price shown is the last known."}
+    PriceTable:
+      type: object
+      required: [unit, per_unit]
+      properties:
+        unit: {type: string}
+        per_unit: {$ref: '#/components/schemas/Money'}
+
+    # ---- jobs
+    JobKind: {type: string, enum: [make_audio, export, backup, refresh_voices]}
+    JobState: {type: string, enum: [queued, running, waiting, paused, needs_you, completed, stopped, failed]}
+    Job:
+      type: object
+      required: [id, kind, state, audiobook_id, book_id, plan_id, chapters_total, chapters_done, waiting, needs_you, started_by, created_at, updated_at]
+      properties:
+        id: {type: string}
+        kind: {$ref: '#/components/schemas/JobKind'}
+        state: {$ref: '#/components/schemas/JobState'}
+        audiobook_id: {type: [string, 'null']}
+        book_id: {type: [string, 'null']}
+        plan_id: {type: [string, 'null']}
+        chapters_total: {type: integer}
+        chapters_done: {type: integer}
+        current_chapter_id: {type: [string, 'null']}
+        waiting:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Detail'
+        needs_you:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Detail'
+        started_by: {$ref: '#/components/schemas/Actor'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    JobPage:
+      type: object
+      required: [items, next]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Job'}
+        next: {type: [string, 'null']}
+
+    # ---- offline
+    Manifest:
+      type: object
+      required: [audiobook_id, generated_at, chapters]
+      properties:
+        audiobook_id: {type: string}
+        generated_at: {type: string, format: date-time}
+        chapters:
+          type: array
+          items:
+            type: object
+            required: [chapter_id, audio, text_sha256]
+            properties:
+              chapter_id: {type: string}
+              audio: {$ref: '#/components/schemas/AudioRef'}
+              text_sha256: {type: string}
+    SyncCheck:
+      type: object
+      required: [up_to_date, newer]
+      properties:
+        up_to_date:
+          type: array
+          items: {type: string}
+          description: Chapter ids whose device copy is current.
+        newer:
+          type: array
+          items:
+            type: object
+            required: [chapter_id, old_audio_id, new_audio, changes]
+            properties:
+              chapter_id: {type: string}
+              old_audio_id: {type: string}
+              new_audio: {$ref: '#/components/schemas/AudioRef'}
+              changes:
+                type: object
+                required: [voice_name, old_voice_revision, new_voice_revision, old_duration_seconds, new_duration_seconds, old_bytes, new_bytes]
+                properties:
+                  voice_name: {type: string}
+                  old_voice_revision: {type: string}
+                  new_voice_revision: {type: string}
+                  old_duration_seconds: {type: number}
+                  new_duration_seconds: {type: number}
+                  old_bytes: {type: integer}
+                  new_bytes: {type: integer}
+
+    # ---- admin
+    Deletion:
+      type: object
+      required: [book_id, scheduled_at, executes_at, state]
+      properties:
+        book_id: {type: string}
+        scheduled_at: {type: string, format: date-time}
+        executes_at: {type: string, format: date-time}
+        state: {type: string, enum: [pending, cancelled, done]}
+        scheduled_by: {$ref: '#/components/schemas/Actor'}
+    Export:
+      type: object
+      required: [id, audiobook_id, state, format, bytes, job_id, created_at]
+      properties:
+        id: {type: string}
+        audiobook_id: {type: string}
+        state: {type: string, enum: [queued, running, ready, failed]}
+        format: {type: string, enum: [m4b]}
+        bytes: {type: [integer, 'null']}
+        job_id: {type: string}
+        created_at: {type: string, format: date-time}
+    Backup:
+      type: object
+      required: [id, state, created_at, bytes, path]
+      properties:
+        id: {type: string}
+        state: {type: string, enum: [running, done, failed]}
+        created_at: {type: string, format: date-time}
+        bytes: {type: [integer, 'null']}
+        path: {type: [string, 'null'], description: "Location on the Bardic computer."}
+    AuditRecord:
+      type: object
+      required: [id, at, action, actor, target]
+      properties:
+        id: {type: string}
+        at: {type: string, format: date-time}
+        action: {type: string, description: 'Open enumeration, e.g. `plan.approved`, `allowance.changed`, `listener.deleted`.'}
+        actor: {$ref: '#/components/schemas/Actor'}
+        target: {type: object, additionalProperties: true}
+    AuditPage:
+      type: object
+      required: [items, next]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/AuditRecord'}
+        next: {type: [string, 'null']}
