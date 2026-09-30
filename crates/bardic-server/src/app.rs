@@ -12,7 +12,7 @@ use axum::{
     http::{request::Parts, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
     Router,
 };
 use rusqlite::params;
@@ -161,6 +161,23 @@ impl FromRequestParts<AppState> for ListenerCtx {
                 "listener_not_found",
                 "No listener has this id.",
             )),
+        }
+    }
+}
+
+/// The listener when `X-Bardic-Listener` is present (then it must be valid), else none.
+/// For operations that return a book's per-listener part but do not require it.
+pub struct MaybeListener(pub Option<ListenerCtx>);
+
+impl FromRequestParts<AppState> for MaybeListener {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        if parts.headers.contains_key("x-bardic-listener") {
+            Ok(MaybeListener(Some(
+                ListenerCtx::from_request_parts(parts, state).await?,
+            )))
+        } else {
+            Ok(MaybeListener(None))
         }
     }
 }
@@ -377,6 +394,20 @@ pub fn router(state: AppState) -> Router {
             get(api::books::chapter_text),
         )
         .route("/api/books/{book_id}/search", get(api::books::search))
+        .route(
+            "/api/books/{book_id}/place",
+            get(api::places::get)
+                .put(api::places::put)
+                .delete(api::places::clear),
+        )
+        .route(
+            "/api/books/{book_id}/place/finished",
+            put(api::places::set_finished),
+        )
+        .route(
+            "/api/books/{book_id}/place/history",
+            get(api::places::history),
+        )
         .route("/api/series", get(api::books::series))
         .route(
             "/api/imports",

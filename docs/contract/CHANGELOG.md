@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.2.1 (found while implementing M2)
+- `PlaceConflict` is a flat object (the `Error` fields plus `server_place`) instead of `allOf` with `Error`, so strict validators can check it. The wire format is unchanged.
+- `updateBook`, `refreshBookCover`, `removeBook` and `restoreBook` accept an optional `X-Bardic-Listener`; with it, `Book.place` is that listener's summary, without it null.
+- `putPlace`: `chapter_not_found` is 404 (the description said 400).
+
 ## 0.2.0 (BREAKING, found while implementing M0)
 - `Actor.listener_id` and `Actor.listener_name` are now nullable. Renaming the server and creating the first listener happen when no listener applies, so the audit record could not be written honestly with a required listener. Clients that read `Actor` must accept null.
 - `Notice.type` documents `server.updated` and `device.updated`.

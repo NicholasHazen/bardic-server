@@ -74,6 +74,23 @@ curl -s -X POST -H "$D" $B/api/books/<id>/remove
 curl -s -X POST -H "$D" $B/api/books/<id>/restore
 ```
 
+## Places (M2)
+```sh
+L="X-Bardic-Listener: <listener id>"
+BOOK=<book id>; CH=<chapter id>
+# Where am I? 404 place_not_found if the book was never opened
+curl -s -H "$L" $B/api/books/$BOOK/place
+# Write the place. base_revision is the revision you last saw (0 if none).
+curl -s -X PUT -H "$D" -H "$L" -H "$J" -d "{\"chapter_id\":\"$CH\",\"offset\":120,\"mode\":\"listening\",\"base_revision\":0}" $B/api/books/$BOOK/place
+# From a second device with a stale revision you get 409 place_conflict with server_place
+# Earlier places, marking finished, and starting over
+curl -s -H "$L" $B/api/books/$BOOK/place/history
+curl -s -X PUT -H "$D" -H "$L" -H "$J" -d '{"finished":true}' $B/api/books/$BOOK/place/finished
+curl -s -X DELETE -H "$D" -H "$L" $B/api/books/$BOOK/place
+# The library with your progress
+curl -s -H "$L" "$B/api/books?filter=in_progress&sort=recent"
+```
+
 ## Browsers on another address
 
 ```sh

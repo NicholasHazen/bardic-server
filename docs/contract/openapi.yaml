@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.0
+  version: 0.2.1
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -466,7 +466,7 @@ paths:
       summary: Edit title, author or series
       description: "Never changes text. Errors: `book_removed` (409)."
       x-bardic-cost: none
-      parameters: [{$ref: '#/components/parameters/Device'}]
+      parameters: [{$ref: '#/components/parameters/Device'}, {$ref: '#/components/parameters/ListenerOptional'}]
       requestBody:
         required: true
         content:
@@ -508,7 +508,7 @@ paths:
       tags: [Library]
       summary: Re-read the cover from the original file
       x-bardic-cost: none
-      parameters: [{$ref: '#/components/parameters/Device'}]
+      parameters: [{$ref: '#/components/parameters/Device'}, {$ref: '#/components/parameters/ListenerOptional'}]
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
@@ -526,7 +526,7 @@ paths:
       summary: Remove a book from the library (reversible)
       description: Keeps audio, places and downloads. Idempotent.
       x-bardic-cost: none
-      parameters: [{$ref: '#/components/parameters/Device'}]
+      parameters: [{$ref: '#/components/parameters/Device'}, {$ref: '#/components/parameters/ListenerOptional'}]
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
@@ -543,7 +543,7 @@ paths:
       tags: [Library]
       summary: Restore a removed book
       x-bardic-cost: none
-      parameters: [{$ref: '#/components/parameters/Device'}]
+      parameters: [{$ref: '#/components/parameters/Device'}, {$ref: '#/components/parameters/ListenerOptional'}]
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
@@ -674,7 +674,7 @@ paths:
         applies the listener's conflict policy (see README) and writes again with
         the server's revision. An identical write changes nothing and returns the
         current place. Queued writes from offline use the same protocol.
-        Other errors: `chapter_not_found`, `offset_out_of_range` (400).
+        Other errors: `chapter_not_found` (404), `offset_out_of_range` (400).
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -1816,6 +1816,12 @@ components:
       required: true
       description: Id of the listener acting. Scopes places and settings; unknown id is 404 `listener_not_found`.
       schema: {type: string}
+    ListenerOptional:
+      name: X-Bardic-Listener
+      in: header
+      required: false
+      description: "Optional. When sent, the returned `Book.place` is that listener's place summary; without it `place` is null. Unknown id is 404 `listener_not_found`."
+      schema: {type: string}
     Device:
       name: X-Bardic-Device
       in: header
@@ -2208,12 +2214,16 @@ components:
         audiobook_id: {type: [string, 'null']}
         base_revision: {type: integer, minimum: 0}
     PlaceConflict:
-      allOf:
-        - $ref: '#/components/schemas/Error'
-        - type: object
-          required: [server_place]
-          properties:
-            server_place: {$ref: '#/components/schemas/Place'}
+      type: object
+      description: An `Error` (code `place_conflict`) that also carries the server's place.
+      required: [code, detail, server_place]
+      properties:
+        code: {type: string}
+        detail: {type: string}
+        retryable: {type: boolean}
+        retry_after_seconds: {type: [integer, 'null']}
+        context: {type: object, additionalProperties: true}
+        server_place: {$ref: '#/components/schemas/Place'}
 
     # ---- voices
     VoiceSourceKind: {type: string, enum: [breeze, gemini, local]}

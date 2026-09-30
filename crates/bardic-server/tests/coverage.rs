@@ -36,6 +36,11 @@ const IMPLEMENTED: &[&str] = &[
     "listChapters",
     "getChapterText",
     "searchBook",
+    "getPlace",
+    "putPlace",
+    "clearPlace",
+    "setFinished",
+    "listPlaceHistory",
 ];
 
 #[test]

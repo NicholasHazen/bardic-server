@@ -23,6 +23,9 @@ pub struct ApiError {
     pub retry_after_seconds: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
+    /// Extra top-level fields some errors carry (for example `server_place`).
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl ApiError {
@@ -34,6 +37,7 @@ impl ApiError {
             retryable: None,
             retry_after_seconds: None,
             context: None,
+            extra: serde_json::Map::new(),
         }
     }
     pub fn invalid(code: &str, detail: impl Into<String>) -> Self {

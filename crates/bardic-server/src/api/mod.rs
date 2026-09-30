@@ -4,6 +4,7 @@ pub mod audit;
 pub mod books;
 pub mod imports;
 pub mod listeners;
+pub mod places;
 pub mod system;
 
 use axum::extract::{FromRequest, FromRequestParts};

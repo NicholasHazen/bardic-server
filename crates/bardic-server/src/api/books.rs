@@ -2,9 +2,13 @@
 //! series; covers; duplicate check. Views are built as JSON values that mirror
 //! the contract's schemas; the conformance tests check them.
 
-use super::{audit, ApiJson, ApiQuery};
+use super::{
+    audit,
+    places::{self, Viewer},
+    ApiJson, ApiQuery,
+};
 use crate::{
-    app::{Actor, AppState, DeviceCtx, ListenerCtx},
+    app::{Actor, AppState, DeviceCtx, ListenerCtx, MaybeListener},
     cover::{sha256_hex, Thumbnail},
     error::ApiError,
     events::Notice,
@@ -43,8 +47,8 @@ fn cover_value(
     }
 }
 
-/// The contract's `Book`. `place` stays null until places arrive in M2.
-pub fn book_value(conn: &Connection, id: &str) -> Result<Value, ApiError> {
+/// The contract's `Book`. `place` is the viewer's place summary, null without a viewer.
+pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Result<Value, ApiError> {
     let row = conn
         .query_row(
             "SELECT id,title,author,state,added_at,series_name,series_order,source_sha256,word_count,chapter_count,cover_sha256,cover_width,cover_height,cover_sample FROM books WHERE id=?1",
@@ -88,6 +92,10 @@ pub fn book_value(conn: &Connection, id: &str) -> Result<Value, ApiError> {
     else {
         return Err(book_not_found());
     };
+    let place = match viewer {
+        Some(v) => places::summary(conn, v, &id)?,
+        None => Value::Null,
+    };
     Ok(json!({
         "id": id,
         "title": title,
@@ -99,7 +107,7 @@ pub fn book_value(conn: &Connection, id: &str) -> Result<Value, ApiError> {
         "chapter_count": chapters,
         "word_count": words,
         "source_sha256": sha,
-        "place": Value::Null,
+        "place": place,
         "audiobook_count": 0,
     }))
 }
@@ -123,8 +131,8 @@ pub fn store_parsed(
         }
         let chapter_id = state.new_id();
         tx.execute(
-            "INSERT INTO chapters(id,book_id,idx,title,kind,text,text_sha256,word_count) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![chapter_id, book_id, idx as i64, ch.title, ch.kind, ch.text, sha256_hex(ch.text.as_bytes()), words],
+            "INSERT INTO chapters(id,book_id,idx,title,kind,text,text_sha256,word_count,char_len) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![chapter_id, book_id, idx as i64, ch.title, ch.kind, ch.text, sha256_hex(ch.text.as_bytes()), words, ch.text.chars().count() as i64],
         )?;
         for (li, (start, end)) in ch.lines.iter().enumerate() {
             tx.execute(
@@ -199,7 +207,7 @@ fn like_pattern(q: &str) -> String {
 /// `listBooks`
 pub async fn list(
     State(state): State<AppState>,
-    _listener: ListenerCtx,
+    listener: ListenerCtx,
     ApiQuery(q): ApiQuery<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = super::audit::page_limit(q.limit)?;
@@ -212,10 +220,11 @@ pub async fn list(
     }
     let sort = q.sort.unwrap_or_else(|| "recent".into());
     let order = match sort.as_str() {
-        // "recent" becomes place-based with M2; until then it is newest added.
-        "recent" | "added" => "added_at DESC, id DESC",
-        "title" => "title COLLATE NOCASE, id",
-        "author" => "author COLLATE NOCASE, title COLLATE NOCASE, id",
+        // Books with a place first, latest place first; the rest newest added first.
+        "recent" => "COALESCE(p.updated_at,'') DESC, b.added_at DESC, b.id DESC",
+        "added" => "b.added_at DESC, b.id DESC",
+        "title" => "b.title COLLATE NOCASE, b.id",
+        "author" => "b.author COLLATE NOCASE, b.title COLLATE NOCASE, b.id",
         _ => {
             return Err(ApiError::invalid(
                 "invalid_request",
@@ -226,34 +235,74 @@ pub async fn list(
     let offset = offset_cursor(&q.after)?;
     let include_removed = q.include_removed.unwrap_or(false);
     let search = q.q.filter(|s| !s.trim().is_empty());
+    let viewer = Viewer {
+        listener: listener.id,
+        now: state.clock.now(),
+    };
     let page = state
         .store
         .run(move |c| {
-            // Places arrive with M2, so nothing is in progress or finished yet.
-            if filter == "in_progress" || filter == "finished" {
-                return Ok(json!({ "items": [], "next": Value::Null }));
-            }
-            let mut sql = String::from("SELECT id FROM books WHERE state IN ('adding','readable'");
+            let mut sql = String::from(
+                "SELECT b.id, p.progress, p.updated_at, p.marked_at FROM books b \
+                 LEFT JOIN places p ON p.book_id=b.id AND p.listener_id=?1 WHERE b.state IN ('adding','readable'",
+            );
             if include_removed {
                 sql.push_str(",'removed'");
             }
             sql.push(')');
-            let mut args: Vec<rusqlite::types::Value> = Vec::new();
+            let mut args: Vec<rusqlite::types::Value> =
+                vec![rusqlite::types::Value::Text(viewer.listener.clone())];
             if let Some(s) = &search {
-                sql.push_str(" AND (title LIKE ?1 ESCAPE '\\' OR author LIKE ?1 ESCAPE '\\' OR series_name LIKE ?1 ESCAPE '\\')");
+                sql.push_str(" AND (b.title LIKE ?2 ESCAPE '\\' OR b.author LIKE ?2 ESCAPE '\\' OR b.series_name LIKE ?2 ESCAPE '\\')");
                 args.push(rusqlite::types::Value::Text(like_pattern(s)));
             }
-            sql.push_str(&format!(" ORDER BY {order} LIMIT {} OFFSET {}", limit + 1, offset));
+            sql.push_str(&format!(" ORDER BY {order}"));
             let mut stmt = c.prepare(&sql)?;
-            let mut ids: Vec<String> =
-                stmt.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(args), |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<f64>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            // Whether a place counts as finished is decided when read, so the
+            // filters are applied here rather than in SQL.
+            let mut ids: Vec<String> = rows
+                .into_iter()
+                .filter(|(_, progress, updated, marked)| {
+                    let finished = match (progress, updated) {
+                        (Some(p), Some(u)) => Some(
+                            crate::places::finished_state(
+                                marked.as_deref().map(places::parse),
+                                *p,
+                                places::parse(u),
+                                viewer.now,
+                            )
+                            .finished,
+                        ),
+                        _ => None,
+                    };
+                    match filter.as_str() {
+                        "in_progress" => finished == Some(false),
+                        "finished" => finished == Some(true),
+                        "not_started" => finished.is_none(),
+                        _ => true,
+                    }
+                })
+                .map(|(id, ..)| id)
+                .skip(offset)
+                .take(limit + 1)
+                .collect();
             let next = if ids.len() > limit {
                 ids.truncate(limit);
                 Value::String(format!("o{}", offset + limit))
             } else {
                 Value::Null
             };
-            let items: Vec<Value> = ids.iter().map(|id| book_value(c, id)).collect::<Result<_, _>>()?;
+            let items: Vec<Value> = ids.iter().map(|id| book_value(c, id, Some(&viewer))).collect::<Result<_, _>>()?;
             Ok(json!({ "items": items, "next": next }))
         })
         .await?;
@@ -291,7 +340,7 @@ pub async fn duplicates(
         .store
         .run(move |c| {
             let dup = |c: &Connection, id: &str| -> Result<Value, ApiError> {
-                let b = book_value(c, id)?;
+                let b = book_value(c, id, None)?;
                 Ok(json!({
                     "book_id": b["id"], "title": b["title"], "author": b["author"],
                     "added_at": b["added_at"], "state": b["state"], "cover": b["cover"],
@@ -327,10 +376,19 @@ pub async fn duplicates(
 /// `getBook`
 pub async fn get_one(
     State(state): State<AppState>,
-    _listener: ListenerCtx,
+    listener: ListenerCtx,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(state.store.run(move |c| book_value(c, &id)).await?))
+    let viewer = Viewer {
+        listener: listener.id,
+        now: state.clock.now(),
+    };
+    Ok(Json(
+        state
+            .store
+            .run(move |c| book_value(c, &id, Some(&viewer)))
+            .await?,
+    ))
 }
 
 fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -381,9 +439,14 @@ fn require_editable(conn: &Connection, id: &str) -> Result<String, ApiError> {
 pub async fn update(
     State(state): State<AppState>,
     device: DeviceCtx,
+    listener: MaybeListener,
     Path(id): Path<String>,
     ApiJson(u): ApiJson<BookUpdate>,
 ) -> Result<Json<Value>, ApiError> {
+    let viewer = listener.0.map(|l| Viewer {
+        listener: l.id,
+        now: state.clock.now(),
+    });
     let bad = |d: &str| ApiError::invalid("invalid_request", d.to_string());
     if let Some(t) = &u.title {
         if t.trim().is_empty() || t.chars().count() > 200 {
@@ -447,7 +510,7 @@ pub async fn update(
                 &actor,
                 &json!({ "book_id": target }),
             )?;
-            let v = book_value(&tx, &target)?;
+            let v = book_value(&tx, &target, viewer.as_ref())?;
             tx.commit()?;
             Ok(v)
         })
@@ -465,9 +528,14 @@ pub fn announce(state: &AppState, book_id: &str) {
 async fn set_removed(
     state: AppState,
     device: DeviceCtx,
+    listener: MaybeListener,
     id: String,
     removed: bool,
 ) -> Result<Json<Value>, ApiError> {
+    let viewer = listener.0.map(|l| Viewer {
+        listener: l.id,
+        now: state.clock.now(),
+    });
     let (audit_id, at, actor) = (state.new_id(), state.now(), Actor::device_only(&device));
     let target = id.clone();
     let v = state
@@ -523,7 +591,7 @@ async fn set_removed(
                 }
                 _ => {} // already in the wanted state: idempotent
             }
-            let v = book_value(&tx, &target)?;
+            let v = book_value(&tx, &target, viewer.as_ref())?;
             tx.commit()?;
             Ok(v)
         })
@@ -536,18 +604,20 @@ async fn set_removed(
 pub async fn remove(
     State(state): State<AppState>,
     device: DeviceCtx,
+    listener: MaybeListener,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    set_removed(state, device, id, true).await
+    set_removed(state, device, listener, id, true).await
 }
 
 /// `restoreBook`
 pub async fn restore(
     State(state): State<AppState>,
     device: DeviceCtx,
+    listener: MaybeListener,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    set_removed(state, device, id, false).await
+    set_removed(state, device, listener, id, false).await
 }
 
 // ----------------------------------------------------------------- series
@@ -555,11 +625,15 @@ pub async fn restore(
 /// `listSeries`
 pub async fn series(
     State(state): State<AppState>,
-    _listener: ListenerCtx,
+    listener: ListenerCtx,
 ) -> Result<Json<Value>, ApiError> {
+    let viewer = Viewer {
+        listener: listener.id,
+        now: state.clock.now(),
+    };
     let out = state
         .store
-        .run(|c| {
+        .run(move |c| {
             let rows: Vec<(String, String, Option<f64>)> = c
                 .prepare(
                     "SELECT series_name, id, series_order FROM books WHERE series_name IS NOT NULL AND state IN ('adding','readable') \
@@ -587,7 +661,7 @@ pub async fn series(
                         }
                     }
                 }
-                let books = members.iter().map(|(id, _)| book_value(c, id)).collect::<Result<Vec<_>, _>>()?;
+                let books = members.iter().map(|(id, _)| book_value(c, id, Some(&viewer))).collect::<Result<Vec<_>, _>>()?;
                 items.push(json!({ "name": name, "books": books, "missing_orders": missing }));
             }
             Ok(json!({ "items": items }))
@@ -773,8 +847,13 @@ pub async fn cover(
 pub async fn refresh_cover(
     State(state): State<AppState>,
     _device: DeviceCtx,
+    listener: MaybeListener,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let viewer = listener.0.map(|l| Viewer {
+        listener: l.id,
+        now: state.clock.now(),
+    });
     let data_dir = state.store.data_dir().to_path_buf();
     let lookup = id.clone();
     let (ext, name): (Option<String>, Option<String>) = state
@@ -820,6 +899,9 @@ pub async fn refresh_cover(
     }
     let target = id.clone();
     Ok(Json(
-        state.store.run(move |c| book_value(c, &target)).await?,
+        state
+            .store
+            .run(move |c| book_value(c, &target, viewer.as_ref()))
+            .await?,
     ))
 }

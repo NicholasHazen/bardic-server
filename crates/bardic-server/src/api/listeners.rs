@@ -34,18 +34,6 @@ pub struct ListenerInput {
 
 /// Number of books this listener has a place in.
 fn books_started(conn: &Connection, listener_id: &str) -> rusqlite::Result<i64> {
-    // `places` arrives with M2; until then nobody has started a book.
-    let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='places'",
-            [],
-            |_| Ok(true),
-        )
-        .optional()?
-        .unwrap_or(false);
-    if !exists {
-        return Ok(0);
-    }
     conn.query_row(
         "SELECT COUNT(*) FROM places WHERE listener_id=?1",
         [listener_id],
@@ -299,11 +287,16 @@ pub async fn impact(
                 ));
             }
             let started = books_started(c, &id)?;
-            // One current place per started book; history arrives with M2.
+            // One current place per started book, plus its earlier places.
+            let history_entries: i64 = c.query_row(
+                "SELECT COUNT(*) FROM place_history WHERE listener_id=?1",
+                [&id],
+                |r| r.get(0),
+            )?;
             Ok(Impact {
                 books_started: started,
                 places: started,
-                history_entries: 0,
+                history_entries,
             })
         })
         .await?;

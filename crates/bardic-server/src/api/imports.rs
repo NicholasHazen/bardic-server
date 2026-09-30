@@ -482,7 +482,7 @@ pub async fn sample(
             )?;
             books::store_parsed(c, &st, &b2, &parsed, None)?;
             audit::record(c, &audit_id, &at, "book.imported", &actor, &json!({ "book_id": b2, "sample": true }))?;
-            books::book_value(c, &b2)
+            books::book_value(c, &b2, None)
         })
         .await?;
     books::announce(&state, &book_id);
