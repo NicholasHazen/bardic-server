@@ -1,5 +1,8 @@
 use axum::{
-    extract::rejection::{JsonRejection, QueryRejection},
+    extract::{
+        multipart::MultipartError,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -82,5 +85,22 @@ impl From<QueryRejection> for ApiError {
 impl From<rusqlite::Error> for ApiError {
     fn from(e: rusqlite::Error) -> Self {
         ApiError::internal(e)
+    }
+}
+
+impl From<MultipartError> for ApiError {
+    fn from(e: MultipartError) -> Self {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "import_too_large",
+                "The file is larger than this server accepts.",
+            )
+        } else {
+            ApiError::invalid(
+                "invalid_request",
+                format!("The upload could not be read: {e}"),
+            )
+        }
     }
 }

@@ -34,6 +34,53 @@ curl -N -H "$D" $B/api/events
 curl -N -H "$D" -H "Last-Event-ID: 0" $B/api/events
 ```
 
+## Listeners (M1)
+
+```sh
+# Add yourself, then use the id as X-Bardic-Listener on listener-scoped calls
+curl -s -X POST -H "$D" -H "$J" -d '{"name":"Nick"}' $B/api/listeners
+L="X-Bardic-Listener: <id from above>"
+curl -s $B/api/listeners
+curl -s $B/api/listeners/<id>/settings
+curl -s -X PUT -H "$D" -H "$J" -d '{"default_voice_id":null,"place_conflict":"ask","continue_into_next_chapter":true}' $B/api/listeners/<id>/settings
+```
+
+## Library (M1)
+
+```sh
+# Add a book: EPUB or UTF-8 text. Returns 202 at once; poll the import.
+curl -s -X POST -H "$D" -F "file=@/path/to/book.epub" $B/api/imports
+curl -s $B/api/imports/<import id>          # state: queued ... done | failed | cancelled
+curl -s -X DELETE -H "$D" $B/api/imports/<import id>   # cancel: leaves no book
+
+# Check a file before uploading it (SHA-256 of the file), and add the built-in sample
+curl -s -H "$D" "$B/api/books/duplicates?sha256=$(shasum -a 256 book.epub | cut -d' ' -f1)"
+curl -s -X POST -H "$D" -H "$J" -d '{}' $B/api/books/sample
+
+# The library (needs the listener header)
+curl -s -H "$D" -H "$L" "$B/api/books?sort=title&limit=20"
+curl -s -H "$D" -H "$L" "$B/api/books?q=ferry"
+curl -s -H "$D" -H "$L" $B/api/series
+
+# One book: chapters, exact text with line spans (code points), search, cover
+curl -s $B/api/books/<id>/chapters
+curl -s $B/api/books/<id>/chapters/<chapter id>/text
+curl -s "$B/api/books/<id>/search?q=ferryman"
+curl -s -o cover.jpg $B/api/books/<id>/cover
+
+# Edit, remove, restore (text is never changed)
+curl -s -X PATCH -H "$D" -H "$J" -d '{"title":"New title","series":{"name":"The Cycle","order":2}}' $B/api/books/<id>
+curl -s -X POST -H "$D" $B/api/books/<id>/remove
+curl -s -X POST -H "$D" $B/api/books/<id>/restore
+```
+
+## Browsers on another address
+
+```sh
+cargo run -p bardic-server -- --allow-origin http://localhost:5173
+# A page from an address not in the list cannot change anything (403 origin_not_allowed).
+```
+
 ## Errors
 Every error is `{ "code": ..., "detail": ... }`. For example a change without a device:
 

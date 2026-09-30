@@ -103,6 +103,7 @@ paths:
           required: false
           schema: {type: string}
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
@@ -333,6 +334,7 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: A page of books.
@@ -559,6 +561,7 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}]
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
@@ -701,6 +704,7 @@ paths:
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
         '204': {description: "Cleared."}
@@ -750,6 +754,7 @@ paths:
         entry's chapter and offset with `putPlace`.
       x-bardic-cost: none
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
@@ -1385,6 +1390,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/AllowanceInput'}
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The allowance.
@@ -1455,6 +1461,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/PriceTable'}
       responses:
+        '404': {$ref: '#/components/responses/NotFound'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: The price.

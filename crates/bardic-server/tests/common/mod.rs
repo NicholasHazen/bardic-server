@@ -1,6 +1,8 @@
 //! Test support: a contract-conformance checker and an in-process test server.
 #![allow(dead_code)]
 
+pub mod epub;
+
 use bardic_server::{
     app::{spawn, Running},
     clock::{Clock, FakeClock},
@@ -181,6 +183,8 @@ fn strict_schema(v: &mut Value, in_all_of: bool) {
 // ------------------------------------------------------------ test server
 
 pub struct TestServer {
+    /// Listener header sent on every call once set with `act_as`.
+    pub as_listener: std::sync::Mutex<Option<String>>,
     pub base: String,
     pub client: reqwest::Client,
     pub running: Option<Running>,
@@ -198,13 +202,19 @@ impl TestServer {
     }
 
     pub async fn start_in(dir: TempDir) -> Self {
+        Self::start_with(dir, |_| {}).await
+    }
+
+    pub async fn start_with(dir: TempDir, tweak: impl FnOnce(&mut Config)) -> Self {
         let clock = Arc::new(FakeClock::new(
             "2026-01-15T12:00:00Z".parse().expect("time"),
         ));
-        let config = Config::for_data_dir(dir.path());
+        let mut config = Config::for_data_dir(dir.path());
+        tweak(&mut config);
         let as_clock: Arc<dyn Clock> = clock.clone();
         let running = spawn(config, as_clock).await.expect("server starts");
         TestServer {
+            as_listener: std::sync::Mutex::new(None),
             base: format!("http://{}", running.addr),
             client: reqwest::Client::new(),
             running: Some(running),
@@ -230,6 +240,9 @@ impl TestServer {
             .request(method.clone(), format!("{}{}", self.base, path));
         if let Some(d) = device {
             req = req.header("x-bardic-device", d);
+        }
+        if let Some(l) = self.as_listener.lock().unwrap().as_ref() {
+            req = req.header("x-bardic-listener", l.as_str());
         }
         if let Some(b) = &body {
             req = req.json(b);
@@ -300,6 +313,67 @@ impl TestServer {
     pub async fn delete(&self, template: &str, path: &str, expect: u16) -> Value {
         self.call(Method::DELETE, template, path, Some(DEVICE), None, expect)
             .await
+    }
+
+    /// Send the listener header on every following call.
+    pub fn act_as(&self, listener_id: &str) {
+        *self.as_listener.lock().unwrap() = Some(listener_id.to_string());
+    }
+
+    /// Stop sending the listener header.
+    pub fn act_as_nobody(&self) {
+        *self.as_listener.lock().unwrap() = None;
+    }
+
+    /// Upload a book file; returns (status, body) after checking the response against the contract.
+    pub async fn upload(&self, file_name: &str, bytes: Vec<u8>, key: Option<&str>) -> (u16, Value) {
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut req = self
+            .client
+            .post(format!("{}/api/imports", self.base))
+            .header("x-bardic-device", DEVICE)
+            .multipart(form);
+        if let Some(k) = key {
+            req = req.header("idempotency-key", k);
+        }
+        let resp = req.send().await.expect("upload sends");
+        let status = resp.status().as_u16();
+        let json: Value = resp.json().await.expect("json body");
+        if let Err(e) = self
+            .contract
+            .check("POST", "/api/imports", status, Some(&json))
+        {
+            panic!("{e}");
+        }
+        (status, json)
+    }
+
+    /// Poll an import until it stops changing; every poll is checked against the contract.
+    pub async fn wait_import(&self, id: &str) -> Value {
+        for _ in 0..200 {
+            let b = self
+                .get(
+                    "/api/imports/{import_id}",
+                    &format!("/api/imports/{id}"),
+                    200,
+                )
+                .await;
+            if matches!(b["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                return b;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("import {id} did not finish");
+    }
+
+    /// Import a file and return the finished book id.
+    pub async fn add_book(&self, file_name: &str, bytes: Vec<u8>) -> String {
+        let (st, imp) = self.upload(file_name, bytes, None).await;
+        assert_eq!(st, 202);
+        let done = self.wait_import(imp["id"].as_str().unwrap()).await;
+        assert_eq!(done["state"], "done", "{done}");
+        done["book_id"].as_str().unwrap().to_string()
     }
 
     /// Create a listener and return its id.

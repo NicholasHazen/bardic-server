@@ -5,10 +5,14 @@ pub mod api;
 pub mod app;
 pub mod clock;
 pub mod config;
+pub mod cover;
 pub mod error;
 pub mod events;
+pub mod importer;
 pub mod lock;
+pub mod sample;
 pub mod store;
+pub mod text;
 
 /// Version of `docs/contract/openapi.yaml` this server implements. A test
 /// asserts it matches the contract file.

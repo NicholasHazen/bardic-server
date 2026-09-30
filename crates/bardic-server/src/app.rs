@@ -8,11 +8,11 @@ use crate::{
     store::{Store, StoreError},
 };
 use axum::{
-    extract::{FromRequestParts, Request, State},
+    extract::{DefaultBodyLimit, FromRequestParts, Request, State},
     http::{request::Parts, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch},
+    routing::{get, patch, post},
     Router,
 };
 use rusqlite::params;
@@ -37,6 +37,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Flips to true on shutdown so long-lived streams end and do not block it.
     pub shutdown: Arc<watch::Sender<bool>>,
+    /// Import ids whose cancellation was requested.
+    pub cancelled_imports: Arc<Mutex<std::collections::HashSet<String>>>,
     ids: Arc<Mutex<ulid::Generator>>,
 }
 
@@ -61,12 +63,23 @@ impl AppState {
             )?;
             Ok(())
         })?;
+        // An import that was running when the server stopped did not finish: fail it
+        // and drop the half-made book, so nothing half-added is ever left behind.
+        store.run_blocking(|c| {
+            c.execute(
+                "UPDATE imports SET state='failed', error_code='import_interrupted', error_detail='Bardic stopped while adding this book. Add it again.' WHERE state NOT IN ('done','failed','cancelled')",
+                [],
+            )?;
+            c.execute("DELETE FROM books WHERE state='adding'", [])?;
+            Ok(())
+        })?;
         Ok(AppState {
             store,
             clock,
             events: Arc::new(EventBus::new()),
             config: Arc::new(config),
             shutdown: Arc::new(watch::channel(false).0),
+            cancelled_imports: Arc::new(Mutex::new(Default::default())),
             ids: Arc::new(Mutex::new(ulid::Generator::new())),
         })
     }
@@ -249,6 +262,75 @@ async fn register_device(state: &AppState, id: String) -> Result<DeviceCtx, ApiE
     Ok(ctx)
 }
 
+/// Browser origin rules. Requests without `Origin` (curl, scripts) pass. A browser
+/// request from an origin that is neither this server's own address nor in the
+/// allow-list may not change anything (403 `origin_not_allowed`) and is given no
+/// CORS headers, so the page cannot read the answer either.
+async fn origin_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let origin = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let Some(origin) = origin else {
+        return next.run(req).await;
+    };
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let same_origin = origin
+        .split_once("://")
+        .map(|(_, h)| h == host)
+        .unwrap_or(false);
+    let listed = state
+        .config
+        .allow_origins
+        .iter()
+        .any(|o| o.trim_end_matches('/') == origin);
+    let allowed = listed || same_origin;
+    let mutating = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    if req.method() == Method::OPTIONS && allowed {
+        let mut r = StatusCode::NO_CONTENT.into_response();
+        add_cors(r.headers_mut(), &origin, true);
+        return r;
+    }
+    if !allowed && mutating {
+        return ApiError::new(StatusCode::FORBIDDEN, "origin_not_allowed", "This page's address is not allowed to change anything on this server. Add it with --allow-origin.")
+            .into_response();
+    }
+    let mut resp = next.run(req).await;
+    if allowed {
+        add_cors(resp.headers_mut(), &origin, false);
+    }
+    resp
+}
+
+fn add_cors(h: &mut axum::http::HeaderMap, origin: &str, preflight: bool) {
+    use axum::http::{header::HeaderName, HeaderValue};
+    if let Ok(v) = HeaderValue::from_str(origin) {
+        h.insert(HeaderName::from_static("access-control-allow-origin"), v);
+    }
+    h.append(axum::http::header::VARY, HeaderValue::from_static("Origin"));
+    if preflight {
+        h.insert(
+            HeaderName::from_static("access-control-allow-methods"),
+            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        h.insert(
+            HeaderName::from_static("access-control-allow-headers"),
+            HeaderValue::from_static(
+                "content-type, x-bardic-device, x-bardic-listener, idempotency-key, last-event-id",
+            ),
+        );
+        h.insert(
+            HeaderName::from_static("access-control-max-age"),
+            HeaderValue::from_static("600"),
+        );
+    }
+}
+
 async fn route_not_found() -> ApiError {
     ApiError::not_found("route_not_found", "There is no such operation.")
 }
@@ -275,6 +357,37 @@ pub fn router(state: AppState) -> Router {
             patch(api::system::update_device),
         )
         .route("/api/audit", get(api::audit::list_audit))
+        .route("/api/books", get(api::books::list))
+        .route("/api/books/duplicates", get(api::books::duplicates))
+        .route("/api/books/sample", post(api::imports::sample))
+        .route(
+            "/api/books/{book_id}",
+            get(api::books::get_one).patch(api::books::update),
+        )
+        .route("/api/books/{book_id}/cover", get(api::books::cover))
+        .route(
+            "/api/books/{book_id}/cover/refresh",
+            post(api::books::refresh_cover),
+        )
+        .route("/api/books/{book_id}/remove", post(api::books::remove))
+        .route("/api/books/{book_id}/restore", post(api::books::restore))
+        .route("/api/books/{book_id}/chapters", get(api::books::chapters))
+        .route(
+            "/api/books/{book_id}/chapters/{chapter_id}/text",
+            get(api::books::chapter_text),
+        )
+        .route("/api/books/{book_id}/search", get(api::books::search))
+        .route("/api/series", get(api::books::series))
+        .route(
+            "/api/imports",
+            post(api::imports::create).layer(DefaultBodyLimit::max(
+                state.config.max_upload_bytes as usize + 64 * 1024,
+            )),
+        )
+        .route(
+            "/api/imports/{import_id}",
+            get(api::imports::get_one).delete(api::imports::cancel),
+        )
         .route(
             "/api/listeners",
             get(api::listeners::list).post(api::listeners::create),
@@ -296,6 +409,7 @@ pub fn router(state: AppState) -> Router {
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), device_layer))
+        .layer(middleware::from_fn_with_state(state.clone(), origin_layer))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

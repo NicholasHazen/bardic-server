@@ -10,6 +10,7 @@ use std::{
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_listeners.sql"),
+    include_str!("../migrations/0003_library.sql"),
 ];
 
 /// Schema version a fresh or fully migrated database ends at.

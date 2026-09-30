@@ -17,6 +17,15 @@ pub struct Config {
     #[arg(long, env = "BARDIC_MAX_UPLOAD_BYTES", default_value_t = 31_457_280)]
     pub max_upload_bytes: u64,
 
+    /// Browser origins allowed to call the API from another address, e.g. http://localhost:5173.
+    /// Repeat the flag or separate with commas. Writes from any other origin are refused.
+    #[arg(
+        long = "allow-origin",
+        env = "BARDIC_ALLOW_ORIGINS",
+        value_delimiter = ','
+    )]
+    pub allow_origins: Vec<String>,
+
     /// Name shown on every device. Only used the first time; later changes go through the API.
     #[arg(long, env = "BARDIC_SERVER_NAME")]
     pub server_name: Option<String>,
@@ -28,6 +37,7 @@ impl Config {
             data_dir: data_dir.into(),
             bind: "127.0.0.1:0".parse().expect("valid address"),
             max_upload_bytes: 31_457_280,
+            allow_origins: Vec::new(),
             server_name: Some("Test Bardic".to_string()),
         }
     }

@@ -20,6 +20,22 @@ const IMPLEMENTED: &[&str] = &[
     "getListenerImpact",
     "getListenerSettings",
     "putListenerSettings",
+    "listBooks",
+    "findDuplicateBooks",
+    "createImport",
+    "getImport",
+    "cancelImport",
+    "createSampleBook",
+    "getBook",
+    "updateBook",
+    "getBookCover",
+    "refreshBookCover",
+    "removeBook",
+    "restoreBook",
+    "listSeries",
+    "listChapters",
+    "getChapterText",
+    "searchBook",
 ];
 
 #[test]

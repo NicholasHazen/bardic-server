@@ -1,6 +1,8 @@
 //! HTTP handlers, grouped as the contract's tags.
 
 pub mod audit;
+pub mod books;
+pub mod imports;
 pub mod listeners;
 pub mod system;
 
