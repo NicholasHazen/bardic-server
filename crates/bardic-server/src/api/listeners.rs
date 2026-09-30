@@ -342,7 +342,6 @@ pub async fn put_settings(
             "place_conflict must be ask, newest or this_device.",
         ));
     }
-    // Voices arrive with M3; until then no id can be valid.
     if let Some(v) = &s.default_voice_id {
         let v = v.clone();
         if !state.store.run(move |c| voice_exists(c, &v)).await? {
@@ -380,6 +379,6 @@ pub async fn put_settings(
     Ok(Json(out))
 }
 
-fn voice_exists(_conn: &Connection, _id: &str) -> Result<bool, ApiError> {
-    Ok(false)
+fn voice_exists(conn: &Connection, id: &str) -> Result<bool, ApiError> {
+    super::voices::voice_exists(conn, id)
 }

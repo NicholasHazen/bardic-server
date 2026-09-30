@@ -409,6 +409,34 @@ pub fn router(state: AppState) -> Router {
             get(api::places::history),
         )
         .route("/api/series", get(api::books::series))
+        .route("/api/voice-sources", get(api::voices::list))
+        .route(
+            "/api/voice-sources/{source_id}",
+            get(api::voices::get_one)
+                .put(api::voices::configure)
+                .delete(api::voices::remove),
+        )
+        .route(
+            "/api/voice-sources/{source_id}/test",
+            post(api::voices::test),
+        )
+        .route(
+            "/api/voice-sources/{source_id}/refresh",
+            post(api::voices::refresh),
+        )
+        .route("/api/voices", get(api::voices::list_voices))
+        .route(
+            "/api/books/{book_id}/audiobooks",
+            get(api::audiobooks::list).post(api::audiobooks::create),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}",
+            get(api::audiobooks::get_one),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}/chapters",
+            get(api::audiobooks::chapters),
+        )
         .route(
             "/api/imports",
             post(api::imports::create).layer(DefaultBodyLimit::max(

@@ -1,11 +1,13 @@
 //! HTTP handlers, grouped as the contract's tags.
 
+pub mod audiobooks;
 pub mod audit;
 pub mod books;
 pub mod imports;
 pub mod listeners;
 pub mod places;
 pub mod system;
+pub mod voices;
 
 use axum::extract::{FromRequest, FromRequestParts};
 

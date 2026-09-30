@@ -91,6 +91,18 @@ curl -s -X DELETE -H "$D" -H "$L" $B/api/books/$BOOK/place
 curl -s -H "$L" "$B/api/books?filter=in_progress&sort=recent"
 ```
 
+## Voices and audiobooks (M3a)
+```sh
+# Set up your Breeze server (tested first; nothing is stored if it fails)
+curl -s -X PUT -H "$D" -H "$J" -d '{"base_url":"http://host.local:7860"}' $B/api/voice-sources/breeze
+curl -s $B/api/voice-sources
+curl -s "$B/api/voices?tier=free"
+curl -s -X POST -H "$D" $B/api/voice-sources/breeze/refresh
+# An audiobook is a book in one voice; creating it is free and makes no audio yet
+curl -s -X POST -H "$D" -H "$J" -d '{"voice_id":"<voice id>"}' $B/api/books/$BOOK/audiobooks
+curl -s $B/api/audiobooks/<audiobook id>/chapters
+```
+
 ## Browsers on another address
 
 ```sh

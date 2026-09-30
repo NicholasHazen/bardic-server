@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.1
+  version: 0.2.2
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -815,10 +815,15 @@ paths:
       tags: [Voices]
       summary: Set up or change a source
       description: |
-        `breeze` needs `base_url`. `gemini` needs `api_key` (write-only: never
-        returned; omit to keep the stored key). `local` needs only `enabled`.
-        The server tests the new configuration before storing it and returns
-        `source_unreachable` or `key_rejected` (400) without storing on failure.
+        `breeze` needs `base_url` (a server root: no path, query or credentials)
+        and accepts an optional `api_key`. `gemini` needs `api_key`. A key is
+        write-only: never returned; omit it to keep the stored key, send an empty
+        string to clear it. `local` needs only `enabled`. The server tests the new
+        configuration before storing it and returns `source_unreachable` or
+        `key_rejected` (400) without storing on failure. Only cloned Breeze voices
+        are offered, because a designed voice sounds different on every request.
+        Until premium audio is built, `gemini` answers 400 `source_unsupported`.
+        Source ids equal their kind.
       x-bardic-cost: network
       parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -964,8 +969,11 @@ paths:
       description: |
         Creating an audiobook is free and spends nothing; it makes no audio. For a
         voice at a given revision there is at most one audiobook per book; a repeat
-        returns the existing one (200). Errors: `voice_not_found` (404),
-        `book_removed` (409).
+        returns the existing one (200), even if the voice is unavailable now. The
+        audiobook keeps the voice's name and revision as they were. An audiobook
+        covers every chapter, front and back matter included. Errors:
+        `voice_not_found` (404), `book_removed` (409), `voice_unavailable` (409:
+        the voice's source is not set up or cannot be reached).
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -2241,7 +2249,7 @@ components:
         checked_at: {type: [string, 'null'], format: date-time}
         detail: {type: [string, 'null'], description: "Safe to show; never contains a key."}
         base_url: {type: [string, 'null'], description: "Breeze only."}
-        has_key: {type: boolean, description: "Gemini only; true when a key is stored."}
+        has_key: {type: boolean, description: "True when a key is stored (Breeze or Gemini)."}
     VoiceSourceConfig:
       type: object
       properties:

@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_listeners.sql"),
     include_str!("../migrations/0003_library.sql"),
     include_str!("../migrations/0004_places.sql"),
+    include_str!("../migrations/0005_voices.sql"),
 ];
 
 /// Schema version a fresh or fully migrated database ends at.

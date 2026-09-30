@@ -41,6 +41,17 @@ const IMPLEMENTED: &[&str] = &[
     "clearPlace",
     "setFinished",
     "listPlaceHistory",
+    "listVoiceSources",
+    "getVoiceSource",
+    "configureVoiceSource",
+    "testVoiceSource",
+    "refreshVoiceSource",
+    "removeVoiceSource",
+    "listVoices",
+    "listAudiobooks",
+    "createAudiobook",
+    "getAudiobook",
+    "listAudiobookChapters",
 ];
 
 #[test]

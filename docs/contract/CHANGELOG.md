@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.2.2 (M3a: voice sources and audiobooks; descriptions only)
+- `configureVoiceSource`: Breeze accepts an optional write-only `api_key` (an empty string clears it); `gemini` answers 400 `source_unsupported` until premium audio exists; source ids equal their kind.
+- `VoiceSource.has_key` applies to Breeze as well as Gemini.
+- `createAudiobook` documents `voice_unavailable` (409) and that an audiobook covers every chapter.
+
 ## 0.2.1 (found while implementing M2)
 - `PlaceConflict` is a flat object (the `Error` fields plus `server_place`) instead of `allOf` with `Error`, so strict validators can check it. The wire format is unchanged.
 - `updateBook`, `refreshBookCover`, `removeBook` and `restoreBook` accept an optional `X-Bardic-Listener`; with it, `Book.place` is that listener's summary, without it null.
