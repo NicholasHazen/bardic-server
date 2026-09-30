@@ -6,6 +6,7 @@ pub mod audit;
 pub mod books;
 pub mod imports;
 pub mod listeners;
+pub mod money;
 pub mod places;
 pub mod system;
 pub mod voices;

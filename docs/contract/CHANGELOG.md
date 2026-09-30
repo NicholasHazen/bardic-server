@@ -2,6 +2,10 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.2.4 (M4a: Gemini source, prices, Allowance; descriptions only)
+- `configureVoiceSource` works for `gemini` (30 prebuilt voices, key checked against the free model list); `source_unsupported` is no longer returned.
+- `refreshPrices` and `Price` document that prices are a dated manual table until a provider price interface is connected. Only `USD` is accepted for money.
+
 ## 0.2.3 (M3b: making audio; additive)
 - `getVoiceSample` documents `206` (Range), `voice_changed` (409) and `rate_limited` (429).
 - Descriptions of `requestChapterAudio` (joining and urgency) and `pauseJob`.

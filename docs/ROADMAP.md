@@ -8,7 +8,7 @@ Milestones end with exit criteria that can be checked against the spec's accepta
 | M1 (done) | Listeners, library, import | Listeners and settings; imports (EPUB, text), duplicate check, sample book, series, chapters, text, cover and colour sample, search, remove and restore. | P1 tested byte for byte. A1 to A10 and L1 to L7 acceptance tests pass with original fixtures. |
 | M2 (done) | Places | `putPlace` with revisions and conflicts, history, finished (marked and automatic), place notices. | P5 and P7, C1 to C7, D1 and C6 tests pass, including the fake clock boundary. |
 | M3 (done) | Free audio | Voice sources `breeze` and `local`; audiobooks; jobs, pacing, recovery; audio delivery with ranges; timings; `requestChapterAudio`, `makeAudiobookReady`. | P3 crash test passes. First audio and resume targets met on the reference machine. |
-| M4 | Premium audio and money | `gemini` source; prices; `previewPlan`, `createPlan`, plan state machine, Allowance, spend with unknowns, quotas as `waiting`. | P2 and P6, D9 and PL1 to PL11 tests pass against a fake provider; one bounded, authorised live check. |
+| M4 (M4a done) | Premium audio and money | `gemini` source; prices; `previewPlan`, `createPlan`, plan state machine, Allowance, spend with unknowns, quotas as `waiting`. | P2 and P6, D9 and PL1 to PL11 tests pass against a fake provider; one bounded, authorised live check. |
 | M5 | Offline, space, deletion, export | Manifest, `checkDownloads`, newer audio, free up space, scheduled deletion with undo, M4B export, backup. | O1 to O8 server-side tests, D6 and G2 to G4 tests pass. |
 | M6 | Hardening | Content refusals, provider edge cases, restart and quota soak, security review, performance targets at 500 books. | Spec section 10 targets met; open items in spec section 15 closed or scheduled. |
 
@@ -51,3 +51,8 @@ Out of scope until the spec changes: characters, casting, performances, voice de
 - Voices are refreshed daily by the worker loop (relative to server start).
 - **Open: audio size.** WAV is 172 MB per hour. Fine for a household server, heavy for offline downloads. Options: an encoder dependency (Opus or AAC) chosen together with the M4B decision in M5, or ffmpeg if present. Clients read `content_type`, so switching is not a contract break.
 - Not yet: `getAudiobookSpace`/`freeAudiobookSpace` (M5), plans (M4), `Retry-After` on queue-full.
+
+## Notes from M4a
+- Gemini: key checked against `GET /v1beta/models` (free); 30 prebuilt voices with Google's one-word descriptions; revision is `<model>/1`. The base URL is configurable (`BARDIC_GEMINI_URL`) for tests and proxies.
+- Prices are per million characters spoken, in USD only. The seeded Gemini price ($16.30 per million characters) is derived from token rates ($0.50 per million text tokens, $9.00 per million audio tokens) and about 1.8 audio tokens and 0.25 text tokens per spoken character. It is labelled manual with its date; estimates will show a range around it. **No provider price interface is connected** (the Google Cloud Billing Catalog needs a different key and a SKU mapping that has to be checked live), so `refreshPrices` reports that honestly.
+- Allowance: one row, default no monthly limit and a $10 default plan limit; the period is the calendar month in UTC. The `spend` ledger exists (reserved, known, unknown); plans and paid requests (M4b, M4c) write to it. Unknown items are counted, never added as zero.

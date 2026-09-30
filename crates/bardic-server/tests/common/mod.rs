@@ -3,6 +3,7 @@
 
 pub mod breeze;
 pub mod epub;
+pub mod gemini;
 
 use bardic_server::{
     app::{spawn, Running},

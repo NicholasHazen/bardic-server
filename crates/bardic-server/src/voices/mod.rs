@@ -5,6 +5,7 @@
 //! `gemini` arrives with premium audio.
 
 pub mod breeze;
+pub mod gemini;
 
 /// What a check of a source found.
 #[derive(Debug, Clone, PartialEq)]

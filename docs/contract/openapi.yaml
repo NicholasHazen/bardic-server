@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.3
+  version: 0.2.4
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -822,7 +822,9 @@ paths:
         configuration before storing it and returns `source_unreachable` or
         `key_rejected` (400) without storing on failure. Only cloned Breeze voices
         are offered, because a designed voice sounds different on every request.
-        Until premium audio is built, `gemini` answers 400 `source_unsupported`.
+        Gemini has no voice-list call: its 30 prebuilt voices are offered once the
+        key is accepted (checked against the free model list). Its voice `revision`
+        changes only when Bardic changes the model it speaks with.
         Source ids equal their kind.
       x-bardic-cost: network
       parameters: [{$ref: '#/components/parameters/Device'}]
@@ -1444,7 +1446,10 @@ paths:
         Reads the provider's price interface (for Google, the Cloud Billing
         Catalog) and stores the result with its date. Also runs daily and
         whenever usage is fetched. A failure keeps the last prices and reports
-        their age in `Price.refresh_error`.
+        the reason in `Price.refresh_error`. No provider interface is connected
+        yet: every price is the manual table (`basis: manual`, seeded with a dated
+        list price for Gemini speech) and says so in `refresh_error`.
+        Prices are per `million_characters` of text spoken.
       x-bardic-cost: network
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:

@@ -426,6 +426,15 @@ pub fn router(state: AppState) -> Router {
             "/api/voice-sources/{source_id}/refresh",
             post(api::voices::refresh),
         )
+        .route(
+            "/api/allowance",
+            get(api::money::get_allowance).put(api::money::put_allowance),
+        )
+        .route(
+            "/api/prices",
+            get(api::money::list_prices).post(api::money::refresh_prices),
+        )
+        .route("/api/prices/{provider}", put(api::money::put_price))
         .route("/api/voices", get(api::voices::list_voices))
         .route(
             "/api/voices/{voice_id}/sample",

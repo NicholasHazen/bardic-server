@@ -62,6 +62,11 @@ const IMPLEMENTED: &[&str] = &[
     "pauseJob",
     "resumeJob",
     "cancelJob",
+    "getAllowance",
+    "putAllowance",
+    "listPrices",
+    "refreshPrices",
+    "putPriceTable",
 ];
 
 #[test]

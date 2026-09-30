@@ -43,15 +43,6 @@ async fn the_three_sources_start_unset_and_gemini_and_unknown_are_refused() {
     assert_eq!(l["items"][0]["base_url"], Value::Null);
     assert_eq!(l["items"][1]["has_key"], false);
 
-    let e = s
-        .put(
-            SRC,
-            "/api/voice-sources/gemini",
-            json!({ "api_key": "x" }),
-            400,
-        )
-        .await;
-    assert_eq!(e["code"], "source_unsupported");
     let e = s.get(SRC, "/api/voice-sources/nope", 404).await;
     assert_eq!(e["code"], "source_not_found");
     // an unconfigured source checks out as unconfigured, without any network

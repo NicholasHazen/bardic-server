@@ -5,7 +5,7 @@ use crate::{
     app::{Actor, AppState, DeviceCtx},
     error::ApiError,
     events::Notice,
-    voices::{breeze, Catalog, Check},
+    voices::{breeze, gemini, Catalog, Check},
 };
 use axum::{
     extract::{Path, State},
@@ -168,22 +168,25 @@ pub struct ConfigIn {
 
 /// Read the stored config, contact the source (outside any database lock), store the outcome.
 async fn check_source(state: &AppState, id: &str, config: Config) -> Result<Catalog, ApiError> {
-    match (id, &config.base_url) {
-        ("breeze", Some(url)) => {
-            let catalog = breeze::fetch_catalog(url, config.api_key.as_deref()).await;
-            let (sid, at, st) = (id.to_string(), state.now(), state.clone());
-            let c2 = catalog.clone();
-            state
-                .store
-                .run(move |c| apply(c, &st, &sid, &c2, &at))
-                .await?;
-            Ok(catalog)
+    let catalog = match (id, &config.base_url, &config.api_key) {
+        ("breeze", Some(url), key) => breeze::fetch_catalog(url, key.as_deref()).await,
+        ("gemini", _, Some(key)) if !key.is_empty() => {
+            gemini::check(&state.config.gemini_url, key).await
         }
-        _ => Err(ApiError::invalid(
-            "source_not_set_up",
-            "This source is not set up.",
-        )),
-    }
+        _ => {
+            return Err(ApiError::invalid(
+                "source_not_set_up",
+                "This source is not set up.",
+            ))
+        }
+    };
+    let (sid, at, st) = (id.to_string(), state.now(), state.clone());
+    let c2 = catalog.clone();
+    state
+        .store
+        .run(move |c| apply(c, &st, &sid, &c2, &at))
+        .await?;
+    Ok(catalog)
 }
 
 /// `configureVoiceSource`: tests the configuration first; stores nothing on failure.
@@ -256,10 +259,61 @@ pub async fn configure(
             announce(&state, &id);
             Ok(Json(v))
         }
-        "gemini" => Err(ApiError::invalid(
-            "source_unsupported",
-            "Gemini voices arrive with premium audio; this server cannot use them yet.",
-        )),
+        "gemini" => {
+            // Omitted keeps the stored key; an empty string clears it (and then there is nothing to check).
+            let api_key = match &input.api_key {
+                Some(k) => Some(k.trim().to_string()).filter(|k| !k.is_empty()),
+                None => current.config.api_key.clone(),
+            };
+            let Some(key) = api_key else {
+                return Err(ApiError::invalid(
+                    "invalid_request",
+                    "Gemini needs api_key.",
+                ));
+            };
+            let catalog = gemini::check(&state.config.gemini_url, &key).await;
+            match catalog.check {
+                Check::Unreachable => {
+                    return Err(ApiError::invalid("source_unreachable", catalog.detail))
+                }
+                Check::KeyRejected => {
+                    return Err(ApiError::invalid("key_rejected", catalog.detail))
+                }
+                Check::Connected => {}
+            }
+            let config = Config {
+                base_url: None,
+                api_key: Some(key),
+            };
+            let (audit_id, at, actor, st) = (
+                state.new_id(),
+                state.now(),
+                Actor::device_only(&device),
+                state.clone(),
+            );
+            let sid = id.clone();
+            let v = state
+                .store
+                .run(move |c| {
+                    c.execute(
+                        "UPDATE voice_sources SET config=?2 WHERE id=?1",
+                        params![sid, config.to_json()],
+                    )?;
+                    apply(c, &st, &sid, &catalog, &at)?;
+                    audit::record(
+                        c,
+                        &audit_id,
+                        &at,
+                        "voice_source.configured",
+                        &actor,
+                        &json!({ "source_id": sid }),
+                    )?;
+                    view(c, &sid)
+                })
+                .await?;
+            announce(&state, &id);
+            Ok(Json(v))
+        }
         _ => {
             let (audit_id, at, actor) = (state.new_id(), state.now(), Actor::device_only(&device));
             let sid = id.clone();
@@ -285,7 +339,12 @@ pub async fn configure(
 async fn recheck(state: AppState, id: String) -> Result<Json<Value>, ApiError> {
     let sid = id.clone();
     let current = state.store.run(move |c| load(c, &sid)).await?;
-    if id == "breeze" && current.config.base_url.is_some() {
+    let set_up = match id.as_str() {
+        "breeze" => current.config.base_url.is_some(),
+        "gemini" => current.config.api_key.is_some(),
+        _ => false,
+    };
+    if set_up {
         check_source(&state, &id, current.config).await?;
         announce(&state, &id);
     }
@@ -398,10 +457,14 @@ pub fn voice_exists(conn: &Connection, id: &str) -> Result<bool, ApiError> {
 
 /// The daily refresh: re-read every source that is set up. Failures are recorded on the source, not raised.
 pub async fn refresh_all(state: &AppState) {
-    let cfg = state.store.run(|c| Ok(load(c, "breeze")?.config)).await;
-    if let Ok(cfg) = cfg {
-        if cfg.base_url.is_some() && check_source(state, "breeze", cfg).await.is_ok() {
-            announce(state, "breeze");
+    for id in ["breeze", "gemini"] {
+        let cfg = state.store.run(move |c| Ok(load(c, id)?.config)).await;
+        if let Ok(cfg) = cfg {
+            if (cfg.base_url.is_some() || cfg.api_key.is_some())
+                && check_source(state, id, cfg).await.is_ok()
+            {
+                announce(state, id);
+            }
         }
     }
 }
