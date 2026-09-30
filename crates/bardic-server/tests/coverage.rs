@@ -12,6 +12,14 @@ const IMPLEMENTED: &[&str] = &[
     "listDevices",
     "updateDevice",
     "listAudit",
+    "listListeners",
+    "createListener",
+    "getListener",
+    "renameListener",
+    "deleteListener",
+    "getListenerImpact",
+    "getListenerSettings",
+    "putListenerSettings",
 ];
 
 #[test]

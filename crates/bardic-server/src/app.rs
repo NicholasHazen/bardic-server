@@ -106,6 +106,52 @@ impl<S: Send + Sync> FromRequestParts<S> for DeviceCtx {
     }
 }
 
+/// The listener acting, from `X-Bardic-Listener`. Extracting it checks that the
+/// listener exists: a missing header is 400 `listener_required`, an unknown id is
+/// 404 `listener_not_found`.
+#[derive(Debug, Clone)]
+pub struct ListenerCtx {
+    pub id: String,
+    pub name: String,
+}
+
+impl FromRequestParts<AppState> for ListenerCtx {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let id = parts
+            .headers
+            .get("x-bardic-listener")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ApiError::invalid(
+                    "listener_required",
+                    "Send X-Bardic-Listener (the id of the listener acting).",
+                )
+            })?;
+        let lookup = id.clone();
+        let name = state
+            .store
+            .run(move |c| {
+                use rusqlite::OptionalExtension;
+                Ok(
+                    c.query_row("SELECT name FROM listeners WHERE id=?1", [&lookup], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()?,
+                )
+            })
+            .await?;
+        match name {
+            Some(name) => Ok(ListenerCtx { id, name }),
+            None => Err(ApiError::not_found(
+                "listener_not_found",
+                "No listener has this id.",
+            )),
+        }
+    }
+}
+
 fn device_required() -> ApiError {
     ApiError::invalid(
         "device_required",
@@ -123,6 +169,15 @@ pub struct Actor {
 }
 
 impl Actor {
+    pub fn with_listener(d: &DeviceCtx, l: &ListenerCtx) -> Self {
+        Actor {
+            listener_id: Some(l.id.clone()),
+            listener_name: Some(l.name.clone()),
+            device_id: d.id.clone(),
+            device_name: d.name.clone(),
+        }
+    }
+
     pub fn device_only(d: &DeviceCtx) -> Self {
         Actor {
             listener_id: None,
@@ -220,6 +275,24 @@ pub fn router(state: AppState) -> Router {
             patch(api::system::update_device),
         )
         .route("/api/audit", get(api::audit::list_audit))
+        .route(
+            "/api/listeners",
+            get(api::listeners::list).post(api::listeners::create),
+        )
+        .route(
+            "/api/listeners/{listener_id}",
+            get(api::listeners::get_one)
+                .patch(api::listeners::rename)
+                .delete(api::listeners::delete),
+        )
+        .route(
+            "/api/listeners/{listener_id}/impact",
+            get(api::listeners::impact),
+        )
+        .route(
+            "/api/listeners/{listener_id}/settings",
+            get(api::listeners::get_settings).put(api::listeners::put_settings),
+        )
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), device_layer))

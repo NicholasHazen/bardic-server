@@ -53,7 +53,7 @@ Codes used (not exhaustive):
 | Plans | `plan_required`, `estimate_expired`, `estimate_changed`, `limit_below_estimate`, `limit_exceeded`, `allowance_exceeded` |
 | Jobs | `job_not_found`, `job_running`, `job_not_pausable` |
 | Audio | `nothing_ready` |
-| General | `invalid_request`, `device_required`, `rate_limited`, `storage_full` |
+| General | `invalid_request`, `device_required`, `listener_required`, `rate_limited`, `storage_full` |
 
 ### Routing
 Literal segments win over parameters: `/api/books/duplicates` and `/api/books/sample` are not book ids.

@@ -7,7 +7,15 @@ use std::{
 
 /// Ordered migrations. `PRAGMA user_version` holds how many have run. Never edit
 /// one that has shipped; add a new file.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_listeners.sql"),
+];
+
+/// Schema version a fresh or fully migrated database ends at.
+pub fn latest_schema_version() -> i64 {
+    MIGRATIONS.len() as i64
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

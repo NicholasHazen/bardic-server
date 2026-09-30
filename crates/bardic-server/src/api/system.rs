@@ -71,7 +71,7 @@ pub async fn update_server(
     device: DeviceCtx,
     ApiJson(input): ApiJson<NameInput>,
 ) -> Result<Json<ServerView>, ApiError> {
-    let name = clean_name(&input.name, "server")?;
+    let name = clean_name(&input.name, "server", 60)?;
     let (audit_id, at, actor) = (state.new_id(), state.now(), Actor::device_only(&device));
     let new_name = name.clone();
     let server_id = state
@@ -149,7 +149,7 @@ pub async fn update_device(
     Path(device_id): Path<String>,
     ApiJson(input): ApiJson<NameInput>,
 ) -> Result<Json<DeviceView>, ApiError> {
-    let name = clean_name(&input.name, "device")?;
+    let name = clean_name(&input.name, "device", 60)?;
     let (audit_id, at, actor) = (state.new_id(), state.now(), Actor::device_only(&device));
     let (target_id, new_name) = (device_id.clone(), name.clone());
     let view = state

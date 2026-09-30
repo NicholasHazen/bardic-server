@@ -313,7 +313,10 @@ async fn data_survives_a_restart_and_migrations_are_idempotent() {
     let b = s2.get("/api/server", "/api/server", 200).await;
     assert_eq!(b["id"], id);
     assert_eq!(b["name"], "Keeps its name");
-    assert_eq!(s2.running.as_ref().unwrap().state.store.schema_version(), 1);
+    assert_eq!(
+        s2.running.as_ref().unwrap().state.store.schema_version(),
+        bardic_server::store::latest_schema_version()
+    );
     s2.stop().await;
 }
 

@@ -273,6 +273,43 @@ impl TestServer {
         .await
     }
 
+    pub async fn post(&self, template: &str, path: &str, body: Value, expect: u16) -> Value {
+        self.call(
+            Method::POST,
+            template,
+            path,
+            Some(DEVICE),
+            Some(body),
+            expect,
+        )
+        .await
+    }
+
+    pub async fn put(&self, template: &str, path: &str, body: Value, expect: u16) -> Value {
+        self.call(
+            Method::PUT,
+            template,
+            path,
+            Some(DEVICE),
+            Some(body),
+            expect,
+        )
+        .await
+    }
+
+    pub async fn delete(&self, template: &str, path: &str, expect: u16) -> Value {
+        self.call(Method::DELETE, template, path, Some(DEVICE), None, expect)
+            .await
+    }
+
+    /// Create a listener and return its id.
+    pub async fn listener(&self, name: &str) -> String {
+        let b = self
+            .post("/api/listeners", "/api/listeners", name_body(name), 201)
+            .await;
+        b["id"].as_str().expect("id").to_string()
+    }
+
     pub async fn stop(mut self) -> TempDir {
         if let Some(r) = self.running.take() {
             r.stop().await;
