@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0007_money.sql"),
     include_str!("../migrations/0008_plans.sql"),
     include_str!("../migrations/0009_space_deletion_backup.sql"),
+    include_str!("../migrations/0010_gemini_price_measured.sql"),
 ];
 
 /// Schema version a fresh or fully migrated database ends at.
@@ -45,6 +46,13 @@ pub struct Store {
 impl Store {
     pub fn open(data_dir: &Path) -> Result<Store, StoreError> {
         std::fs::create_dir_all(data_dir)?;
+        // The database holds API keys, and backups and exports hold the owner's books: other
+        // accounts on this computer have no business in the folder.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         let mut conn = Connection::open(data_dir.join("bardic.db"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;

@@ -36,11 +36,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Decode an image of any supported type into a bounded JPEG thumbnail with a colour sample.
 pub fn thumbnail(bytes: &[u8]) -> Result<Thumbnail, String> {
-    let img = image::load_from_memory(bytes).map_err(|e| format!("cannot read image: {e}"))?;
-    let (w, h) = img.dimensions();
+    // The size is read from the header first: a small file can declare a huge picture.
+    let (w, h) = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("cannot read image: {e}"))?
+        .into_dimensions()
+        .map_err(|e| format!("cannot read image: {e}"))?;
     if w == 0 || h == 0 || w.saturating_mul(h) > 64_000_000 {
         return Err("image has unreasonable dimensions".into());
     }
+    let img = image::load_from_memory(bytes).map_err(|e| format!("cannot read image: {e}"))?;
     let thumb = img.resize(MAX_W, MAX_H, FilterType::Lanczos3);
     let rgb = DynamicImage::ImageRgb8(thumb.to_rgb8());
     let mut jpeg = Vec::new();
@@ -184,6 +189,49 @@ mod tests {
             .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    /// A PNG whose header claims 40000 x 40000 pixels and has no pixel data at all.
+    fn huge_declared() -> Vec<u8> {
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for b in bytes {
+                c ^= *b as u32;
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        (c >> 1) ^ 0xEDB8_8320
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        }
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(40_000u32.to_be_bytes());
+        ihdr.extend(40_000u32.to_be_bytes());
+        ihdr.extend([8, 2, 0, 0, 0]);
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        out.extend(&ihdr);
+        out.extend(crc(&ihdr).to_be_bytes());
+        // an empty compressed stream and the end marker, so the file is well formed up to its pixels
+        for (kind, body) in [
+            (&b"IDAT"[..], &[0x78, 0x9c, 0x03, 0, 0, 0, 0, 1][..]),
+            (&b"IEND"[..], &[][..]),
+        ] {
+            out.extend((body.len() as u32).to_be_bytes());
+            let mut chunk = kind.to_vec();
+            chunk.extend(body);
+            out.extend(&chunk);
+            out.extend(crc(&chunk).to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn a_picture_that_declares_a_huge_size_is_refused_before_it_is_decoded() {
+        let e = thumbnail(&huge_declared()).err().expect("refused");
+        assert!(e.contains("unreasonable dimensions"), "{e}");
     }
 
     #[test]

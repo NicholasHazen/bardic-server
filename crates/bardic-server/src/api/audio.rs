@@ -869,6 +869,7 @@ async fn premium_sample(
                     plan: None,
                     audiobook_id: "",
                     chapter_id: Some(&vid),
+                    job_id: None,
                     amount,
                     now,
                 },
@@ -884,28 +885,33 @@ async fn premium_sample(
     let result = gemini::speak(&state.config.gemini_url, &key, external, SAMPLE_TEXT).await;
     let (outcome, speech) = match result {
         Ok(s) => (
-            match s.usage.cost_micros() {
+            match s.usage.cost_micros(state.clock.now()) {
                 Some(m) => spend::Outcome::Known {
                     micros: m,
                     input: s.usage.input_tokens,
                     output: s.usage.output_tokens,
                 },
                 None => spend::Outcome::Unknown {
-                    note: "Gemini did not report complete usage.",
+                    note: format!("Gemini did not report complete usage ({}).", s.usage.detail)
+                        .into(),
                 },
             },
             Ok(s),
         ),
         Err(e) => match e {
             gemini::SpeakError::NoAudio(u) => (
-                match u.cost_micros() {
+                match u.cost_micros(state.clock.now()) {
                     Some(m) => spend::Outcome::Known {
                         micros: m,
                         input: u.input_tokens,
                         output: u.output_tokens,
                     },
                     None => spend::Outcome::Unknown {
-                        note: "Gemini answered without audio and without complete usage.",
+                        note: format!(
+                            "Gemini answered without audio and without complete usage ({}).",
+                            u.detail
+                        )
+                        .into(),
                     },
                 },
                 Err(ApiError::conflict(
@@ -915,7 +921,7 @@ async fn premium_sample(
             ),
             gemini::SpeakError::Uncertain => (
                 spend::Outcome::Unknown {
-                    note: "The request may have been processed.",
+                    note: "The request may have been processed.".into(),
                 },
                 Err(ApiError::conflict(
                     "provider_uncertain",
@@ -924,7 +930,7 @@ async fn premium_sample(
             ),
             gemini::SpeakError::Failed(m) => (
                 spend::Outcome::Unknown {
-                    note: "The response could not be used; the request was billed.",
+                    note: "The response could not be used; the request was billed.".into(),
                 },
                 Err(ApiError::conflict("provider_refused", m)),
             ),

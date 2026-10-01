@@ -766,6 +766,12 @@ async fn search_is_case_insensitive_and_offsets_point_at_the_match() {
     assert_eq!(p2["next"], Value::Null);
     assert_eq!(s.get(t, &q("q=zzzz"), 200).await["total"], 0);
     assert_eq!(s.get(t, &q("q="), 400).await["code"], "invalid_request");
+    // a search term has a size limit: it is scanned against every chapter
+    s.get(t, &q(&format!("q={}", "a".repeat(200))), 200).await;
+    assert_eq!(
+        s.get(t, &q(&format!("q={}", "a".repeat(201))), 400).await["code"],
+        "invalid_request"
+    );
     assert_eq!(
         s.get(t, &format!("{B}/nope/search?q=a"), 404).await["code"],
         "book_not_found"
@@ -807,5 +813,29 @@ async fn library_changes_are_announced() {
     assert!(ok, "missing notices; saw {seen}");
     drop(resp);
     let _ = name_body;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn an_epub_that_lists_the_same_chapter_many_times_is_read_once() {
+    let (s, _) = server_with_listener().await;
+    let id = s
+        .add_book(
+            "loop.epub",
+            Epub {
+                spine_repeats: 500,
+                ..Default::default()
+            }
+            .build(),
+        )
+        .await;
+    let ch = s
+        .get(
+            "/api/books/{book_id}/chapters",
+            &format!("/api/books/{id}/chapters"),
+            200,
+        )
+        .await;
+    assert_eq!(ch["items"].as_array().unwrap().len(), 2, "{ch}");
     s.stop().await;
 }

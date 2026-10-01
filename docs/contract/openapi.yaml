@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.6
+  version: 0.3.0
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -629,7 +629,7 @@ paths:
       description: Reads stored text only; sends nothing anywhere.
       x-bardic-cost: none
       parameters:
-        - {name: q, in: query, required: true, schema: {type: string, minLength: 1}}
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 200}}
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
@@ -1296,6 +1296,13 @@ paths:
         stated (no usage reported, a timeout, a stop mid-request) is counted in
         `spent.unknown_items`, never as zero. Gemini answering without audio counts
         as spent and fails that chapter; it is not retried until you resume.
+
+        For the plan's limit and the monthly limit, a request whose cost is
+        unknown still counts at the amount that was held back for it (its high
+        estimate): it may have been billed, so it never makes room to send the
+        same request again. It is shown as an unknown item, not as spent.
+        Stopping a plan takes effect at the next request; one already sent
+        finishes and is kept.
       x-bardic-cost: may_charge
       parameters:
         - {$ref: '#/components/parameters/Listener'}

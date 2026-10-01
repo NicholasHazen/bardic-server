@@ -495,7 +495,7 @@ async fn gemini_chunk(
         chapter_id.to_string(),
         ctx.plan.clone(),
     );
-    let sid = spend_id.clone();
+    let (sid, jid) = (spend_id.clone(), job_id.to_string());
     let now = state.clock.now();
     let denied = state
         .store
@@ -508,6 +508,7 @@ async fn gemini_chunk(
                     plan: plan.as_ref().map(|(i, l)| (i.as_str(), *l)),
                     audiobook_id: &aid,
                     chapter_id: Some(&cid),
+                    job_id: Some(&jid),
                     amount,
                     now,
                 },
@@ -518,6 +519,7 @@ async fn gemini_chunk(
     match denied {
         Err(spend::Denied::Plan) => return Err(Stop::Failed(Fail::Limit)),
         Err(spend::Denied::Allowance) => return Err(Stop::Failed(Fail::Allowance)),
+        Err(spend::Denied::Stopped) => return Err(Stop::Interrupted),
         Ok(()) => {}
     }
     let settle = |outcome: spend::Outcome| {
@@ -542,7 +544,7 @@ async fn gemini_chunk(
         };
         return match result {
             Ok(speech) => {
-                match speech.usage.cost_micros() {
+                match speech.usage.cost_micros(state.clock.now()) {
                     Some(m) => {
                         settle(spend::Outcome::Known {
                             micros: m,
@@ -553,7 +555,11 @@ async fn gemini_chunk(
                     }
                     None => {
                         settle(spend::Outcome::Unknown {
-                            note: "Gemini did not report complete usage.",
+                            note: format!(
+                                "Gemini did not report complete usage ({}).",
+                                speech.usage.detail
+                            )
+                            .into(),
                         })
                         .await
                     }
@@ -579,27 +585,27 @@ async fn gemini_chunk(
                     }
                     gemini::SpeakError::Refused(c) => (spend::Outcome::Nothing, Fail::Refused(c)),
                     gemini::SpeakError::NoAudio(u) => (
-                        match u.cost_micros() {
+                        match u.cost_micros(state.clock.now()) {
                             Some(m) => spend::Outcome::Known {
                                 micros: m,
                                 input: u.input_tokens,
                                 output: u.output_tokens,
                             },
                             None => spend::Outcome::Unknown {
-                                note: "Gemini answered without audio and without complete usage.",
+                                note: format!("Gemini answered without audio and without complete usage ({}).", u.detail).into(),
                             },
                         },
                         Fail::NoAudio,
                     ),
                     gemini::SpeakError::Uncertain => (
                         spend::Outcome::Unknown {
-                            note: "The request may have been processed; it was not sent again.",
+                            note: "The request may have been processed; it was not sent again.".into(),
                         },
                         Fail::Uncertain,
                     ),
                     gemini::SpeakError::Failed(m) => (
                         spend::Outcome::Unknown {
-                            note: "The response could not be used; the request was billed.",
+                            note: "The response could not be used; the request was billed.".into(),
                         },
                         Fail::Failed(m),
                     ),
@@ -659,6 +665,7 @@ async fn make_chapter(
         match verdict {
             Err(spend::Denied::Plan) => return Err(Stop::Failed(Fail::Limit)),
             Err(spend::Denied::Allowance) => return Err(Stop::Failed(Fail::Allowance)),
+            Err(spend::Denied::Stopped) => return Err(Stop::Interrupted),
             Ok(()) => {}
         }
     }

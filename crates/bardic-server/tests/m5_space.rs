@@ -851,3 +851,110 @@ async fn a_premium_audiobook_says_what_making_it_again_would_cost() {
     assert_eq!(sp["remake_estimate"]["basis"], "manual");
     s.stop().await;
 }
+
+/// Runs the real ffmpeg (skipped when it is not installed): the file must be a real M4B whose
+/// chapter markers and duration match the chapters that were exported.
+#[tokio::test]
+async fn a_real_ffmpeg_makes_a_playable_m4b_with_chapter_markers() {
+    let ffmpeg = std::env::var("BARDIC_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+    let ffprobe = std::env::var("BARDIC_FFPROBE").unwrap_or_else(|_| "ffprobe".to_string());
+    let have = |p: &str| {
+        std::process::Command::new(p)
+            .arg("-version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !have(&ffmpeg) || !have(&ffprobe) {
+        eprintln!("skipped: ffmpeg and ffprobe are not installed");
+        return;
+    }
+    let f = Fx::with(move |c| c.ffmpeg = ffmpeg).await;
+    f.make_all().await;
+    let ex = format!("/api/audiobooks/{}/exports", f.audiobook);
+    let e =
+        f.s.call(
+            Method::POST,
+            "/api/audiobooks/{audiobook_id}/exports",
+            &ex,
+            Some(DEVICE),
+            None,
+            202,
+        )
+        .await;
+    let id = e["id"].as_str().unwrap().to_string();
+    let mut ready = Value::Null;
+    for _ in 0..400 {
+        ready =
+            f.s.get(
+                "/api/exports/{export_id}",
+                &format!("/api/exports/{id}"),
+                200,
+            )
+            .await;
+        if ready["state"] != "running" {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+    }
+    assert_eq!(ready["state"], "ready", "{ready}");
+    let (_, body) =
+        f.s.raw(
+            "/api/exports/{export_id}/file",
+            &format!("/api/exports/{id}/file"),
+            &[],
+            200,
+        )
+        .await;
+    let out = f.s.dir.path().join("probe.m4b");
+    std::fs::write(&out, &body).unwrap();
+    let probe = std::process::Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-of",
+            "json",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(probe.status.success(), "ffprobe could not read the export");
+    let j: Value = serde_json::from_slice(&probe.stdout).unwrap();
+    eprintln!(
+        "export: {} bytes, {}",
+        body.len(),
+        j["format"]["format_name"]
+    );
+    assert!(j["format"]["format_name"].as_str().unwrap().contains("mp4"));
+    let audio: Vec<&Value> = j["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["codec_type"] == "audio")
+        .collect();
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0]["codec_name"], "aac");
+    assert_eq!(audio[0]["channels"], 1);
+    let chapters = j["chapters"].as_array().unwrap();
+    assert_eq!(chapters.len(), f.chapters.len(), "{}", j["chapters"]);
+    let mut prev_end = 0.0;
+    for c in chapters {
+        let (a, b) = (
+            c["start_time"].as_str().unwrap().parse::<f64>().unwrap(),
+            c["end_time"].as_str().unwrap().parse::<f64>().unwrap(),
+        );
+        assert!(
+            a >= prev_end - 0.05 && b > a,
+            "chapters overlap: {chapters:?}"
+        );
+        prev_end = b;
+    }
+    let dur: f64 = j["format"]["duration"].as_str().unwrap().parse().unwrap();
+    assert!(
+        (dur - prev_end).abs() < 0.5,
+        "chapters end at {prev_end}s but the file is {dur}s"
+    );
+    f.s.stop().await;
+}

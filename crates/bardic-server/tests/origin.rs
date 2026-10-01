@@ -116,3 +116,84 @@ async fn the_servers_own_pages_and_scripts_are_allowed() {
     s.listener("Riley").await;
     s.stop().await;
 }
+
+#[tokio::test]
+async fn a_rebound_public_name_is_refused_for_reads_and_writes() {
+    let s = server().await;
+    // DNS rebinding: the page's origin and the Host header are both the attacker's name.
+    let post = s
+        .client
+        .post(format!("{}/api/listeners", s.base))
+        .header("host", "evil.example:8765")
+        .header("origin", "http://evil.example:8765")
+        .header("x-bardic-device", DEVICE)
+        .json(&json!({"name": "X"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 403);
+    assert!(post.headers().get("access-control-allow-origin").is_none());
+    let b: serde_json::Value = post.json().await.unwrap();
+    assert_eq!(b["code"], "host_not_allowed");
+    // a same-origin read from the rebound page carries no Origin at all
+    let get = s
+        .client
+        .get(format!("{}/api/listeners", s.base))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 403);
+    assert_eq!(
+        s.get("/api/listeners", "/api/listeners", 200).await["items"],
+        json!([])
+    );
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn the_names_a_household_uses_are_accepted() {
+    let s = TestServer::start_with(tempfile::tempdir().unwrap(), |c| {
+        c.allow_hosts = vec!["bardic.example.org".to_string()];
+        c.allow_origins = vec!["https://reader.example.org".to_string()];
+    })
+    .await;
+    for host in [
+        "127.0.0.1:8765",
+        "localhost:8765",
+        "[::1]:8765",
+        "100.114.183.42:8765",
+        "macbook-pro:8765",
+        "Macbook-Pro.local:8765",
+        "macbook-pro.tail1234.ts.net",
+        "nas.home.arpa",
+        "bardic.example.org",
+        "BARDIC.example.org:443",
+        "reader.example.org",
+    ] {
+        let r = s
+            .client
+            .get(format!("{}/api/health", s.base))
+            .header("host", host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{host}");
+    }
+    for host in [
+        "evil.example",
+        "evil.example:8765",
+        "127.0.0.1.evil.example",
+        "localhost.evil.example",
+    ] {
+        let r = s
+            .client
+            .get(format!("{}/api/health", s.base))
+            .header("host", host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{host}");
+    }
+    s.stop().await;
+}

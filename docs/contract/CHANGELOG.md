@@ -2,6 +2,12 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.3.0 (M6: hardening; tightens validation)
+- **`searchBook`: `q` is at most 200 characters** (400 `invalid_request` otherwise). A client that sends longer search text must shorten it.
+- Spending rules: for limits, a request with unknown cost counts at its held-back amount; `resumePlan` and the worker therefore refuse to send it again past the limit (`limit_exceeded`). `resumePlan` also answers `deletion_pending` while the book is scheduled for deletion.
+- `stopPlan` takes effect at the next request instead of at the end of the chapter in hand; the request already sent finishes and its audio is kept. `pausePlan` is unchanged (chapter boundary).
+- Not in the contract: every request is refused with 403 `host_not_allowed` unless its `Host` is an IP address, `localhost`, a single-word or private-network name, or listed with `--allow-host` (DNS-rebinding guard).
+
 ## 0.2.6 (M5: space, offline, deletion, export, backup; additive)
 - `downloadExport` documents `206`.
 - Behaviour documented for `freeAudiobookSpace`, `checkDownloads`, `scheduleBookDeletion`, `createExport` and `createBackup`. New codes: `encoder_missing`, `export_not_ready`, `export_not_found`, `export_failed` (job detail), `deletion_pending`, `job_running` on deletion.

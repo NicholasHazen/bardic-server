@@ -65,7 +65,8 @@ pub fn month_bounds(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
 pub struct Spent {
     pub known: i64,
     pub unknown_items: i64,
-    /// Money held back for requests not settled yet; counts toward limits, not toward "spent".
+    /// Money held back for requests not settled yet, and for unknown ones at their reserved amount;
+    /// counts toward limits, not toward "spent".
     pub reserved: i64,
 }
 
@@ -73,7 +74,7 @@ pub fn spent_between(conn: &Connection, start: &str, end: &str) -> Result<Spent,
     let (known, unknown, reserved): (i64, i64, i64) = conn.query_row(
         "SELECT COALESCE(SUM(CASE WHEN status='known' THEN known_micros END),0),
                 COALESCE(SUM(status='unknown'),0),
-                COALESCE(SUM(CASE WHEN status='reserved' THEN reserved END),0)
+                COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN reserved END),0)
          FROM spend WHERE at>=?1 AND at<?2",
         [start, end],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

@@ -32,6 +32,8 @@ docs/                   spec, contract, architecture, roadmap
 cargo run -p bardic-server -- --data-dir ./data     # http://127.0.0.1:8765
 #   --bind 0.0.0.0:8765          listen on the network (trusted networks only)
 #   --allow-origin http://localhost:5173   let a dev web page call the API
+#   --allow-host bardic.example.org        a public DNS name this server may be reached by
+#                                          (IPs, localhost, single-word and .local/.lan/.ts.net names always work)
 cargo test                                          # includes contract conformance
 cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```

@@ -286,6 +286,16 @@ async fn register_device(state: &AppState, id: String) -> Result<DeviceCtx, ApiE
 /// allow-list may not change anything (403 `origin_not_allowed`) and is given no
 /// CORS headers, so the page cannot read the answer either.
 async fn origin_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    // DNS rebinding: a page on a public name that was pointed at this machine is "same origin"
+    // by the rule below, so the name the request arrived by must itself be one we expect.
+    let host_header = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !host_allowed(host_header, &state.config) {
+        return ApiError::new(StatusCode::FORBIDDEN, "host_not_allowed", "This server is not reachable by that name. Use its address, or add the name with --allow-host.").into_response();
+    }
     let origin = req
         .headers()
         .get(axum::http::header::ORIGIN)
@@ -324,6 +334,47 @@ async fn origin_layer(State(state): State<AppState>, req: Request, next: Next) -
         add_cors(resp.headers_mut(), &origin, false);
     }
     resp
+}
+
+/// The host part of a `Host` header: no port, no brackets, lower case, no trailing dot.
+fn host_name(h: &str) -> String {
+    let h = h.trim();
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        h.rsplit_once(':').map_or(h, |(n, p)| {
+            if p.chars().all(|c| c.is_ascii_digit()) {
+                n
+            } else {
+                h
+            }
+        })
+    };
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Names a visitor on the owner's own network uses. Anything with a public suffix is a name an
+/// outside page could have rebound to this machine, so it must be listed.
+fn host_allowed(header: &str, config: &crate::config::Config) -> bool {
+    let name = host_name(header);
+    if name.is_empty() {
+        // HTTP/1.0 or a bare client: nothing to rebind.
+        return true;
+    }
+    if name.parse::<std::net::IpAddr>().is_ok() || name == "localhost" || !name.contains('.') {
+        return true;
+    }
+    if [".local", ".lan", ".home.arpa", ".ts.net", ".localhost"]
+        .iter()
+        .any(|s| name.ends_with(s))
+    {
+        return true;
+    }
+    config.allow_hosts.iter().any(|h| host_name(h) == name)
+        || config.allow_origins.iter().any(|o| {
+            o.split_once("://")
+                .is_some_and(|(_, h)| host_name(h.trim_end_matches('/')) == name)
+        })
 }
 
 fn add_cors(h: &mut axum::http::HeaderMap, origin: &str, preflight: bool) {

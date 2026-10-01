@@ -119,42 +119,98 @@ pub async fn check(base_url: &str, key: &str) -> Catalog {
 
 // ---------------------------------------------------------------- speaking
 
-/// Dated list prices for `MODEL`, in micros of a dollar per million tokens (2026-09-27).
-/// Actual spending is always computed from the token counts Gemini reports.
+/// List prices for `MODEL`, in micros of a dollar per million tokens (checked 2026-09-30 against
+/// ai.google.dev/gemini-api/docs/pricing): text input and audio output. Audio input is not a billed
+/// line for this model; the server reports about 200 audio input tokens on every request.
+/// The rates double on 2027-01-01. Actual spending is always computed from the token counts Gemini reports.
 pub const INPUT_MICROS_PER_MILLION: i64 = 500_000;
 pub const OUTPUT_MICROS_PER_MILLION: i64 = 9_000_000;
+pub const DOUBLING: &str = "2027-01-01T00:00:00Z";
+
+/// (text input, audio output) micros per million tokens at `at`.
+pub fn rates(at: chrono::DateTime<chrono::Utc>) -> (i64, i64) {
+    let doubling: chrono::DateTime<chrono::Utc> = DOUBLING.parse().expect("date");
+    if at >= doubling {
+        (INPUT_MICROS_PER_MILLION * 2, OUTPUT_MICROS_PER_MILLION * 2)
+    } else {
+        (INPUT_MICROS_PER_MILLION, OUTPUT_MICROS_PER_MILLION)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage {
+    /// Billed text input tokens.
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// Token counts as reported, numbers and field names only, for the note on an unknown cost.
+    pub detail: String,
 }
 
 impl Usage {
-    /// Cost in micros, only when the report is complete and unambiguous: input is all text,
-    /// output is all audio, and nothing else was billed. Anything else is unknown, never zero.
-    pub fn cost_micros(&self) -> Option<i64> {
+    /// Cost in micros, only when the report is complete and unambiguous: input is text (plus the
+    /// unbilled audio input), output is all audio, and nothing else was billed. Anything else is
+    /// unknown, never zero.
+    pub fn cost_micros(&self, at: chrono::DateTime<chrono::Utc>) -> Option<i64> {
         let (i, o) = (self.input_tokens?, self.output_tokens?);
+        let (ri, ro) = rates(at);
         // Round up, so a known cost is never understated.
-        Some(
-            (i * INPUT_MICROS_PER_MILLION + 999_999) / 1_000_000
-                + (o * OUTPUT_MICROS_PER_MILLION + 999_999) / 1_000_000,
-        )
+        Some((i * ri + 999_999) / 1_000_000 + (o * ro + 999_999) / 1_000_000)
     }
 }
 
 pub fn parse_usage(body: &Value) -> Usage {
     let u = &body["usage"];
-    let count = |v: &Value| v.as_i64().filter(|n| *n >= 0);
-    let only = |field: &str, modality: &str, total: Option<i64>| -> Option<i64> {
-        let parts = u[field].as_array()?;
-        let sum: i64 = parts
-            .iter()
-            .map(|p| count(&p["tokens"]))
-            .sum::<Option<i64>>()?;
-        (!parts.is_empty() && parts.iter().all(|p| p["modality"] == modality) && Some(sum) == total)
-            .then_some(sum)
+    let mut usage = parse_usage_counts(u);
+    usage.detail = describe_usage(u);
+    usage
+}
+
+/// Field names and numbers only (never text), e.g. `total_input_tokens=6, output_by_modality=[audio:76]`.
+fn describe_usage(u: &Value) -> String {
+    let Some(map) = u.as_object() else {
+        return "no usage report".to_string();
     };
+    let mut parts = vec![];
+    for (k, v) in map {
+        if let Some(n) = v.as_i64() {
+            parts.push(format!("{k}={n}"));
+        } else if k.ends_with("_by_modality") {
+            let items: Vec<String> = v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| format!("{}:{}", p["modality"].as_str().unwrap_or("?"), p["tokens"]))
+                .collect();
+            parts.push(format!("{k}=[{}]", items.join(",")));
+        }
+    }
+    parts.join(", ")
+}
+
+fn parse_usage_counts(u: &Value) -> Usage {
+    let count = |v: &Value| v.as_i64().filter(|n| *n >= 0);
+    // Sum of a modality breakdown, only when every part is one of `allowed`, it adds up to
+    // `total`, and returning the tokens of `billed`.
+    let breakdown =
+        |field: &str, allowed: &[&str], billed: &str, total: Option<i64>| -> Option<i64> {
+            let parts = u[field].as_array()?;
+            let sum: i64 = parts
+                .iter()
+                .map(|p| count(&p["tokens"]))
+                .sum::<Option<i64>>()?;
+            let known = !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|p| allowed.iter().any(|m| p["modality"] == *m))
+                && Some(sum) == total;
+            known.then(|| {
+                parts
+                    .iter()
+                    .filter(|p| p["modality"] == billed)
+                    .filter_map(|p| count(&p["tokens"]))
+                    .sum()
+            })
+        };
     let (input, output) = (
         count(&u["total_input_tokens"]),
         count(&u["total_output_tokens"]),
@@ -166,8 +222,14 @@ pub fn parse_usage(body: &Value) -> Usage {
         return Usage::default();
     }
     Usage {
-        input_tokens: only("input_tokens_by_modality", "text", input),
-        output_tokens: only("output_tokens_by_modality", "audio", output),
+        detail: String::new(),
+        input_tokens: breakdown(
+            "input_tokens_by_modality",
+            &["text", "audio"],
+            "text",
+            input,
+        ),
+        output_tokens: breakdown("output_tokens_by_modality", &["audio"], "audio", output),
     }
 }
 
@@ -309,4 +371,49 @@ fn wav_pcm(wav: &[u8]) -> Option<Vec<u8>> {
         && u16::from_le_bytes([fmt[14], fmt[15]]) == 16;
     let data = wav.windows(4).position(|w| w == b"data")?;
     ok.then(|| wav.get(data + 8..).map(<[u8]>::to_vec))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    /// Usage reports from the live API (2026-09-30), speech output.
+    const LIVE_SHORT: &str = r#"{"usage":{"total_tokens":82,"total_input_tokens":6,"input_tokens_by_modality":[{"modality":"text","tokens":6}],"total_cached_tokens":0,"total_output_tokens":76,"output_tokens_by_modality":[{"modality":"audio","tokens":76}],"total_tool_use_tokens":0,"total_thought_tokens":0,"raw_prompt_token":279}}"#;
+    /// The model the server uses reports about 200 audio input tokens on every request.
+    const LIVE_CHAPTER: &str = r#"{"usage":{"input_tokens_by_modality":[{"modality":"audio","tokens":201},{"modality":"text","tokens":31}],"output_tokens_by_modality":[{"modality":"audio","tokens":350}],"raw_prompt_token":345,"total_cached_tokens":0,"total_input_tokens":232,"total_output_tokens":350,"total_thought_tokens":0,"total_tokens":582,"total_tool_use_tokens":0}}"#;
+
+    fn at(y: i32, m: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn the_live_usage_reports_are_understood() {
+        let u = parse_usage(&serde_json::from_str(LIVE_SHORT).unwrap());
+        assert_eq!((u.input_tokens, u.output_tokens), (Some(6), Some(76)));
+        assert_eq!(u.cost_micros(at(2026, 9)), Some(3 + 684));
+        let u = parse_usage(&serde_json::from_str(LIVE_CHAPTER).unwrap());
+        assert_eq!((u.input_tokens, u.output_tokens), (Some(31), Some(350)));
+        assert_eq!(u.cost_micros(at(2026, 9)), Some(16 + 3150));
+    }
+
+    #[test]
+    fn rates_double_on_the_first_of_january_2027() {
+        let u = parse_usage(&serde_json::from_str(LIVE_CHAPTER).unwrap());
+        assert_eq!(u.cost_micros(at(2026, 12)), Some(3166));
+        assert_eq!(u.cost_micros(at(2027, 1)), Some(31 + 6300));
+    }
+
+    #[test]
+    fn an_unexpected_modality_or_a_mismatch_is_unknown() {
+        for bad in [
+            r#"{"usage":{"total_input_tokens":5,"input_tokens_by_modality":[{"modality":"image","tokens":5}],"total_output_tokens":9,"output_tokens_by_modality":[{"modality":"audio","tokens":9}]}}"#,
+            r#"{"usage":{"total_input_tokens":5,"input_tokens_by_modality":[{"modality":"text","tokens":4}],"total_output_tokens":9,"output_tokens_by_modality":[{"modality":"audio","tokens":9}]}}"#,
+            r#"{"usage":{"total_input_tokens":5,"input_tokens_by_modality":[{"modality":"text","tokens":5}],"total_output_tokens":9,"output_tokens_by_modality":[{"modality":"audio","tokens":9}],"total_thought_tokens":3}}"#,
+            r#"{}"#,
+        ] {
+            let u = parse_usage(&serde_json::from_str(bad).unwrap());
+            assert_eq!(u.cost_micros(at(2026, 9)), None, "{bad}");
+        }
+    }
 }

@@ -330,3 +330,17 @@ fn a_newer_data_folder_is_refused_not_damaged() {
     let err = Store::open(dir.path()).err().expect("must refuse");
     assert!(err.to_string().contains("newer Bardic"), "{err}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_data_folder_is_private_to_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = common::TestServer::start().await;
+    let mode = std::fs::metadata(s.dir.path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "keys and books live here");
+    s.stop().await;
+}

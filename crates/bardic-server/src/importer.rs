@@ -12,6 +12,8 @@ use zip::ZipArchive;
 const MAX_ENTRIES: usize = 5_000;
 const MAX_EXPANDED: u64 = 100 * 1024 * 1024;
 const MAX_ENTRY: u64 = 30 * 1024 * 1024;
+/// Most text one book may hold once markup is removed (a long novel is about 1 MB).
+const MAX_BOOK_TEXT: usize = 100 * 1024 * 1024;
 
 pub struct ParsedChapter {
     pub title: String,
@@ -328,7 +330,17 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
         .collect();
     let mut chapters: Vec<ParsedChapter> = Vec::new();
     let mut story_n = 0;
+    // An entry listed many times in the spine is read once, and the text of a book is capped,
+    // so a small file cannot expand into gigabytes of chapters.
+    let mut seen = std::collections::HashSet::new();
+    let mut text_bytes = 0usize;
     for idref in spine {
+        if !seen.insert(idref.clone()) {
+            continue;
+        }
+        if text_bytes > MAX_BOOK_TEXT {
+            break;
+        }
         let Some(item) = manifest.get(&idref) else {
             continue;
         };
@@ -343,6 +355,7 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
         if ex.paragraphs.is_empty() {
             continue;
         }
+        text_bytes += ex.paragraphs.iter().map(String::len).sum::<usize>();
         let hint = ex
             .title
             .clone()

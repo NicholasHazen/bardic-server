@@ -762,6 +762,12 @@ pub async fn search(
     if q.q.is_empty() {
         return Err(ApiError::invalid("invalid_request", "q must not be empty."));
     }
+    if q.q.chars().count() > 200 {
+        return Err(ApiError::invalid(
+            "invalid_request",
+            "q must be at most 200 characters.",
+        ));
+    }
     let limit = super::audit::page_limit(q.limit)?;
     let skip = offset_cursor(&q.after)?;
     let needle: Vec<char> = q.q.chars().map(fold).collect();
