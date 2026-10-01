@@ -34,6 +34,7 @@ fn cover_value(
     w: Option<i64>,
     h: Option<i64>,
     sample: Option<String>,
+    generated: bool,
 ) -> Value {
     match (sha, w, h) {
         (Some(sha), Some(w), Some(h)) => json!({
@@ -42,6 +43,7 @@ fn cover_value(
             "width": w,
             "height": h,
             "sample": sample.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+            "generated": generated,
         }),
         _ => Value::Null,
     }
@@ -51,7 +53,7 @@ fn cover_value(
 pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Result<Value, ApiError> {
     let row = conn
         .query_row(
-            "SELECT id,title,author,state,added_at,series_name,series_order,source_sha256,word_count,chapter_count,cover_sha256,cover_width,cover_height,cover_sample FROM books WHERE id=?1",
+            "SELECT id,title,author,state,added_at,series_name,series_order,source_sha256,word_count,chapter_count,story_chapter_count,cover_sha256,cover_width,cover_height,cover_sample,cover_generated FROM books WHERE id=?1",
             [id],
             |r| {
                 Ok((
@@ -65,10 +67,12 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, i64>(8)?,
                     r.get::<_, i64>(9)?,
-                    r.get::<_, Option<String>>(10)?,
-                    r.get::<_, Option<i64>>(11)?,
+                    r.get::<_, i64>(10)?,
+                    r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<i64>>(12)?,
-                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, Option<i64>>(13)?,
+                    r.get::<_, Option<String>>(14)?,
+                    r.get::<_, i64>(15)? != 0,
                 ))
             },
         )
@@ -84,10 +88,12 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
         sha,
         words,
         chapters,
+        story_chapters,
         csha,
         cw,
         ch,
         csample,
+        cgen,
     )) = row
     else {
         return Err(book_not_found());
@@ -111,8 +117,9 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
         "state": state,
         "added_at": added_at,
         "series": sname.map(|n| json!({ "name": n, "order": sorder })),
-        "cover": cover_value(&id, csha, cw, ch, csample),
+        "cover": cover_value(&id, csha, cw, ch, csample, cgen),
         "chapter_count": chapters,
+        "story_chapter_count": story_chapters,
         "word_count": words,
         "source_sha256": sha,
         "place": place,
@@ -129,6 +136,15 @@ pub fn store_parsed(
     parsed: &ParsedBook,
     thumb: Option<&Thumbnail>,
 ) -> Result<(), ApiError> {
+    // A book without a cover gets a generated one (drawn before the transaction opens).
+    let made;
+    let (thumb, generated) = match thumb {
+        Some(t) => (t, false),
+        None => {
+            made = crate::cover::generated(&parsed.title, &parsed.author);
+            (&made, true)
+        }
+    };
     let tx = conn.transaction()?;
     let (mut story_words, mut story_chapters) = (0i64, 0i64);
     for (idx, ch) in parsed.chapters.iter().enumerate() {
@@ -155,22 +171,47 @@ pub fn store_parsed(
             )?;
         }
     }
-    let (csha, cw, ch, cjpeg, csample) = match thumb {
-        Some(t) => (
-            Some(t.sha256.clone()),
-            Some(t.width as i64),
-            Some(t.height as i64),
-            Some(t.jpeg.clone()),
-            Some(serde_json::to_string(&t.sample).expect("sample serializes")),
-        ),
-        None => (None, None, None, None, None),
-    };
     tx.execute(
-        "UPDATE books SET title=?2, author=?3, state='readable', word_count=?4, chapter_count=?5, cover_sha256=?6, cover_width=?7, cover_height=?8, cover_jpeg=?9, cover_sample=?10 WHERE id=?1",
-        params![book_id, parsed.title, parsed.author, story_words, story_chapters, csha, cw, ch, cjpeg, csample],
+        "UPDATE books SET title=?2, author=?3, state='readable', word_count=?4, chapter_count=?5, story_chapter_count=?6, cover_sha256=?7, cover_width=?8, cover_height=?9, cover_jpeg=?10, cover_sample=?11, cover_generated=?12 WHERE id=?1",
+        params![
+            book_id,
+            parsed.title,
+            parsed.author,
+            story_words,
+            parsed.chapters.len() as i64,
+            story_chapters,
+            thumb.sha256,
+            thumb.width as i64,
+            thumb.height as i64,
+            thumb.jpeg,
+            serde_json::to_string(&thumb.sample).expect("sample serializes"),
+            generated
+        ],
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Give every book that has no cover a generated one. Runs at start-up. One transaction, so a crash
+/// leaves either all of them or none; idempotent, because it only touches books with no cover image.
+pub fn backfill_generated_covers(conn: &mut Connection) -> rusqlite::Result<usize> {
+    let missing: Vec<(String, String, String)> = conn
+        .prepare("SELECT id,title,author FROM books WHERE cover_jpeg IS NULL AND state IN ('readable','removed')")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    for (id, title, author) in &missing {
+        let t = crate::cover::generated(title, author);
+        tx.execute(
+            "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6,cover_generated=1 WHERE id=?1 AND cover_jpeg IS NULL",
+            params![id, t.sha256, t.width as i64, t.height as i64, t.jpeg, serde_json::to_string(&t.sample).expect("sample serializes")],
+        )?;
+    }
+    tx.commit()?;
+    Ok(missing.len())
 }
 
 // ------------------------------------------------------------------ list
@@ -327,10 +368,7 @@ pub struct DupQuery {
 }
 
 fn norm(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+    crate::cover::normalise(s)
 }
 
 /// `findDuplicateBooks`: informs; never blocks an import.
@@ -857,7 +895,8 @@ pub async fn cover(
     Ok(resp)
 }
 
-/// `refreshBookCover`: re-read the cover from the saved original, if there is one.
+/// `refreshBookCover`: re-read a real cover from the saved original, if there is one; a generated
+/// cover is drawn again from the current title and author. A generated cover never replaces a real one.
 pub async fn refresh_cover(
     State(state): State<AppState>,
     _device: DeviceCtx,
@@ -870,18 +909,51 @@ pub async fn refresh_cover(
     });
     let data_dir = state.store.data_dir().to_path_buf();
     let lookup = id.clone();
-    let (ext, name): (Option<String>, Option<String>) = state
+    let (ext, name, generated, title, author): (
+        Option<String>,
+        Option<String>,
+        bool,
+        String,
+        String,
+    ) = state
         .store
         .run(move |c| {
             book_exists(c, &lookup)?;
             Ok(c.query_row(
-                "SELECT source_ext,source_name FROM books WHERE id=?1",
+                "SELECT source_ext,source_name,cover_generated,title,author FROM books WHERE id=?1",
                 [&lookup],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, i64>(2)? != 0,
+                        r.get(3)?,
+                        r.get(4)?,
+                    ))
+                },
             )?)
         })
         .await?;
-    if let (Some(ext), Some(name)) = (ext, name) {
+    if generated {
+        let t = tokio::task::spawn_blocking(move || crate::cover::generated(&title, &author))
+            .await
+            .map_err(ApiError::internal)?;
+        let target = id.clone();
+        let changed = state
+            .store
+            .run(move |c| {
+                // Only while the cover is still a generated one: a real cover is never replaced.
+                let n = c.execute(
+                    "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6 WHERE id=?1 AND cover_generated=1 AND cover_sha256 IS NOT ?2",
+                    params![target, t.sha256, t.width as i64, t.height as i64, t.jpeg, serde_json::to_string(&t.sample).expect("sample")],
+                )?;
+                Ok(n > 0)
+            })
+            .await?;
+        if changed {
+            announce(&state, &id);
+        }
+    } else if let (Some(ext), Some(name)) = (ext, name) {
         let path = data_dir
             .join("originals")
             .join(&id)
@@ -901,7 +973,7 @@ pub async fn refresh_cover(
                     .store
                     .run(move |c| {
                         c.execute(
-                            "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6 WHERE id=?1",
+                            "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6,cover_generated=0 WHERE id=?1",
                             params![target, t.sha256, t.width as i64, t.height as i64, t.jpeg, serde_json::to_string(&t.sample).expect("sample")],
                         )?;
                         Ok(())

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.3.3
+  version: 0.4.0
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -492,7 +492,9 @@ paths:
       summary: Cover image
       description: |
         The URL in `Book.cover.url` carries the image hash, so responses are
-        immutable and cacheable forever. 404 when the book has no cover.
+        immutable and cacheable forever. Every readable or removed book has a
+        cover: a real one from the file, or a generated one (`Cover.generated`).
+        404 `cover_not_found` only for a book that is still being added.
       x-bardic-cost: none
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
@@ -509,6 +511,12 @@ paths:
       operationId: refreshBookCover
       tags: [Library]
       summary: Re-read the cover from the original file
+      description: |
+        A real cover is re-read from the saved original; the book keeps its
+        cover if the original has none or cannot be read. A generated cover
+        (`Cover.generated`) is drawn again from the book's current title and
+        author, so editing the title or author and then refreshing may change
+        its colour. A generated cover never replaces a real one.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}, {$ref: '#/components/parameters/ListenerOptional'}]
       responses:
@@ -2083,9 +2091,17 @@ components:
     # ---- library
     Cover:
       type: object
-      required: [url, sha256, width, height]
+      required: [url, sha256, width, height, generated]
       properties:
         url: {type: string, description: "Root-relative; contains the hash so it is immutable."}
+        generated:
+          type: boolean
+          description: |
+            True when the server drew this cover because the book has none: a
+            2:3 JPEG with a gradient and soft blobs, no text, so clients put
+            the title on it. Its hue comes from a hash of the normalised title
+            and author (the same book has the same colour on every device),
+            and `sample.vivid` is true. False for a cover from the book file.
         sha256: {type: string}
         width: {type: integer}
         height: {type: integer}
@@ -2113,7 +2129,7 @@ components:
     BookState: {type: string, enum: [adding, readable, removed, deleting]}
     Book:
       type: object
-      required: [id, title, author, state, added_at, series, cover, chapter_count, word_count, source_sha256, place]
+      required: [id, title, author, state, added_at, series, cover, chapter_count, story_chapter_count, word_count, source_sha256, place]
       properties:
         id: {type: string}
         title: {type: string}
@@ -2128,7 +2144,19 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/Cover'
-        chapter_count: {type: integer, description: "Story chapters only."}
+        chapter_count:
+          type: integer
+          description: |
+            Every chapter, front and back matter included. This is the number an
+            audiobook covers ("N of M chapters ready"). Before 0.4.0 it counted
+            story chapters only; that count is now `story_chapter_count`.
+        story_chapter_count:
+          type: integer
+          description: |
+            Story chapters only, matter excluded. Matter is front and back
+            matter (copyright, contents, acknowledgements and the like),
+            detected from EPUB chapter titles; plain text has none, so there
+            both counts are equal. `word_count` also counts story chapters only.
         word_count: {type: integer}
         source_sha256: {type: [string, 'null']}
         place:

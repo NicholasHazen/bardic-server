@@ -17,7 +17,7 @@ A *line* is the smallest unit that is spoken and highlighted.
 ## Chapters
 - **EPUB:** the spine order. Navigation documents are skipped. A chapter's title is its first `h1` to `h3`, else the document title, else `Section N`. The heading text stays in the chapter text, so it is read aloud like any other line.
 - **Text file:** a chapter starts at a short paragraph (80 characters or fewer) beginning `Chapter`, `Part`, `Book`, `Section`, `Prologue`, `Epilogue`, `Interlude`, `Preface` or `Introduction`, when at least two exist; otherwise at lone roman numerals when at least two exist. Text before the first heading becomes a chapter titled `Beginning`. With no headings the whole file is one chapter, titled like the book.
-- **Kind:** `front_matter` for titles such as Copyright, Contents, Dedication, Epigraph; `back_matter` for Acknowledgements, About the Author, Colophon; otherwise `story`. Only story chapters count in `chapter_count` and `word_count`.
+- **Kind:** `front_matter` for titles such as Copyright, Contents, Dedication, Epigraph; `back_matter` for Acknowledgements, About the Author, Colophon; otherwise `story`. Only story chapters count in `story_chapter_count` and `word_count`; `chapter_count` counts every chapter.
 
 ## Markup handling (EPUB)
 A forgiving reader, not a browser: scripts, styles, headers, SVG and navigation are dropped; block elements (`p`, `div`, headings, list items, quotes, table rows…) become paragraphs; `<br>` becomes a space; common named and all numeric entities are decoded; malformed markup never fails an import.

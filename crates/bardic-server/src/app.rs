@@ -88,6 +88,8 @@ impl AppState {
             c.execute("DELETE FROM books WHERE state='adding'", [])?;
             Ok(())
         })?;
+        // Books added before covers were generated get one now.
+        store.run_blocking(crate::api::books::backfill_generated_covers)?;
         Ok(AppState {
             store,
             clock,

@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0008_plans.sql"),
     include_str!("../migrations/0009_space_deletion_backup.sql"),
     include_str!("../migrations/0010_gemini_price_measured.sql"),
+    include_str!("../migrations/0011_generated_covers.sql"),
 ];
 
 /// Schema version a fresh or fully migrated database ends at.

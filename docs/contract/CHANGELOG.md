@@ -2,6 +2,13 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.4.0 (chapter counts and generated covers; changes the meaning of a field)
+- **`Book.chapter_count` now counts every chapter**, front and back matter included (it counted story chapters only). It is the number an audiobook covers, so "N of M chapters ready" and a header count agree. **Clients that want the story-only number must read the new `Book.story_chapter_count`** (required; the old meaning; plain text has no matter, so the two are equal there). `word_count` is unchanged (story chapters).
+- **Every book now has a cover.** A book with no cover image (text, the sample, an EPUB without one or with one that cannot be read) gets a generated cover: a deterministic 240 x 360 JPEG (2:3) with a gradient and soft blobs and **no text**, so the client overlays the title. Its hue is derived from the normalised title and author, and its `sample.vivid` is true. `Book.cover` is therefore null only while a book is still being added. Books already in a data folder get one when the server starts.
+- **`Cover.generated`** (boolean, required) is true for these and false for covers from the file. Clients may show the title only when it is true.
+- `refreshBookCover` on a generated cover draws it again from the current title and author (an edited title or author may change the colour; the URL changes with the hash). On a real cover it behaves as before. A generated cover never replaces a real one.
+- `getBookCover` answers 404 `cover_not_found` only for a book that is still being added.
+
 ## 0.3.3 (description only)
 - `getVoiceSample`: removed the stale line saying premium samples arrive with premium audio. A Gemini sample works whenever a key is accepted (since M4).
 

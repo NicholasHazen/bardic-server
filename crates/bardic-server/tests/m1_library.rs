@@ -48,8 +48,10 @@ async fn the_sample_book_is_readable_at_once_with_exact_lines() {
     assert_eq!(book["state"], "readable");
     assert_eq!(book["title"], "The Lantern Keeper");
     assert_eq!(book["chapter_count"], 3);
+    assert_eq!(book["story_chapter_count"], 3);
     assert!(book["word_count"].as_i64().unwrap() > 300);
-    assert_eq!(book["cover"], Value::Null);
+    assert_eq!(book["cover"]["generated"], true);
+    assert_eq!(book["cover"]["sample"]["vivid"], true);
     assert_eq!(book["place"], Value::Null);
     let id = book["id"].as_str().unwrap();
 
@@ -92,8 +94,9 @@ async fn the_sample_book_is_readable_at_once_with_exact_lines() {
     assert_eq!(t["text_sha256"], items[0]["text_sha256"]);
     assert_eq!(common_sha(text), t["text_sha256"].as_str().unwrap());
 
-    let e = s.get(BID, &format!("{B}/{id}/cover"), 404).await;
-    assert_eq!(e["code"], "cover_not_found");
+    // Every readable book has a cover (here a generated one); an unknown book has none.
+    let e = s.get(BID, &format!("{B}/nope/cover"), 404).await;
+    assert_eq!(e["code"], "book_not_found");
     let e = s
         .get(
             "/api/books/{book_id}/chapters/{chapter_id}/text",
@@ -133,6 +136,7 @@ async fn a_text_file_becomes_a_book_with_chapters_and_its_original_is_kept() {
     assert_eq!(book["title"], "river days");
     assert_eq!(book["author"], "");
     assert_eq!(book["chapter_count"], 2);
+    assert_eq!(book["story_chapter_count"], 2);
     assert_eq!(book["source_sha256"], expect_sha.as_str());
     let original = s.dir.path().join("originals").join(id).join("source.txt");
     assert!(original.exists(), "original kept at {}", original.display());
