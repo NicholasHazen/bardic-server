@@ -262,10 +262,24 @@ pub async fn create_backup(
         Actor::device_only(&device),
     );
     let (i, a) = (id.clone(), at.clone());
-    let v = state
+    let (v, fresh) = state
         .store
         .run(move |c| {
             let tx = c.transaction()?;
+            // One backup at a time: asking again returns the one under way.
+            let running: Option<String> = tx
+                .query_row("SELECT id FROM backups WHERE state='running'", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if let Some(r) = running {
+                let v = tx.query_row(
+                    &format!("SELECT {BACKUP_COLS} FROM backups WHERE id=?1"),
+                    [&r],
+                    backup_value,
+                )?;
+                return Ok((v, false));
+            }
             tx.execute(
                 "INSERT INTO backups(id,state,created_at) VALUES(?1,'running',?2)",
                 params![i, a],
@@ -284,11 +298,13 @@ pub async fn create_backup(
                 backup_value,
             )?;
             tx.commit()?;
-            Ok(v)
+            Ok((v, true))
         })
         .await?;
-    let st = state.clone();
-    tokio::spawn(async move { run_backup(st, id).await });
+    if fresh {
+        let st = state.clone();
+        tokio::spawn(async move { run_backup(st, id).await });
+    }
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 
@@ -306,6 +322,18 @@ async fn run_backup(state: AppState, id: String) {
             .run(move |c| Ok(c.execute_batch(&format!("VACUUM INTO '{target}'"))?))
             .await
             .map_err(|e| e.detail)?;
+        // The copy may be taken elsewhere: it does not carry the API keys (enter them again after
+        // a restore), and the vacuum drops the old pages that still held them.
+        let copy = db.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+            let c = rusqlite::Connection::open(copy)?;
+            c.execute_batch(
+                "UPDATE voice_sources SET config = json_remove(config, '$.api_key'); VACUUM;",
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
         let data = state.store.data_dir().to_path_buf();
         let media = dir.join("media");
         let linked = tokio::task::spawn_blocking(move || -> std::io::Result<i64> {
@@ -327,7 +355,8 @@ async fn run_backup(state: AppState, id: String) {
         Ok(db_bytes + linked)
     }
     .await;
-    let (i, path) = (id.clone(), dir.to_string_lossy().to_string());
+    // relative to the data folder: clients are not told where the server keeps its files
+    let (i, path) = (id.clone(), format!("backups/{id}"));
     let _ = state
         .store
         .run(move |c| {

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.3.0
+  version: 0.3.1
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -94,7 +94,8 @@ paths:
         A long-lived `text/event-stream`. Each event is a `Notice` carrying ids
         only; clients re-read the resource. Supports `Last-Event-ID` to resume;
         if the server cannot replay from that id it sends a `resync` notice and
-        clients reload what they show.
+        clients reload what they show. At most 64 streams are open at once; the
+        next is refused with 429 `too_many_streams` until one closes.
       x-bardic-cost: none
       parameters:
         - {$ref: '#/components/parameters/Listener'}
@@ -105,6 +106,7 @@ paths:
       responses:
         '404': {$ref: '#/components/responses/NotFound'}
         '400': {$ref: '#/components/responses/InvalidRequest'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Event stream.
@@ -1754,7 +1756,9 @@ paths:
         markers, using `ffmpeg` on the Bardic computer. Chapters not made yet are
         left out. Errors (409): `nothing_ready`, `encoder_missing` (no ffmpeg).
         A failed export has job state `failed` with `needs_you.code`
-        `export_failed`. `downloadExport` is 409 `export_not_ready` until the
+        `export_failed`. One export per audiobook runs at a time (asking again
+        returns the one under way) and the computer encodes one at a time.
+        `downloadExport` is 409 `export_not_ready` until the
         export is `ready`, and supports `Range`.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
@@ -1847,7 +1851,9 @@ paths:
         immutable, so they are hard links (a copy where the filesystem cannot
         link), not second copies. The backup is a folder on the same computer: copy
         it elsewhere to survive a lost disk. Returns a job-like `Backup`; poll
-        `listBackups` for `done`.
+        `listBackups` for `done`. The copy of the database does not contain API
+        keys (enter them again after a restore). Only one backup runs at a time; asking again
+        returns the one under way.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
@@ -2668,7 +2674,7 @@ components:
         state: {type: string, enum: [running, done, failed]}
         created_at: {type: string, format: date-time}
         bytes: {type: [integer, 'null']}
-        path: {type: [string, 'null'], description: "Location on the Bardic computer."}
+        path: {type: [string, 'null'], description: "Location inside the Bardic data folder, e.g. `backups/<id>`."}
     AuditRecord:
       type: object
       required: [id, at, action, actor, target]

@@ -40,7 +40,21 @@ pub struct AppState {
     /// Import ids whose cancellation was requested.
     pub cancelled_imports: Arc<Mutex<std::collections::HashSet<String>>>,
     pub jobs: Arc<crate::jobs::JobSignal>,
+    /// Limits on work a client can start, so a burst cannot exhaust the computer.
+    pub gates: Arc<Gates>,
     ids: Arc<Mutex<ulid::Generator>>,
+}
+
+/// Most imports processed at once; the rest stay `queued` and start in turn.
+pub const MAX_IMPORTS_AT_ONCE: usize = 3;
+/// Most open event streams (a household has a few devices).
+pub const MAX_EVENT_STREAMS: usize = 64;
+
+pub struct Gates {
+    pub imports: tokio::sync::Semaphore,
+    /// One ffmpeg at a time.
+    pub exports: tokio::sync::Semaphore,
+    pub streams: std::sync::atomic::AtomicUsize,
 }
 
 impl AppState {
@@ -82,6 +96,11 @@ impl AppState {
             shutdown: Arc::new(watch::channel(false).0),
             cancelled_imports: Arc::new(Mutex::new(Default::default())),
             jobs: Arc::new(crate::jobs::JobSignal::new()),
+            gates: Arc::new(Gates {
+                imports: tokio::sync::Semaphore::new(MAX_IMPORTS_AT_ONCE),
+                exports: tokio::sync::Semaphore::new(1),
+                streams: std::sync::atomic::AtomicUsize::new(0),
+            }),
             ids: Arc::new(Mutex::new(ulid::Generator::new())),
         })
     }

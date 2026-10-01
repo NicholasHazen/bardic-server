@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.3.1 (M6: limits on work a client can start; backups; additive)
+- `Backup.path` is now relative to the data folder (`backups/<id>`) instead of absolute, and the backup's database copy has the API keys removed.
+- `streamEvents` documents `429 too_many_streams` (at most 64 open streams).
+- `createExport` and `createBackup`: a second request while one runs for the same audiobook (backup: at all) returns the one under way. Imports are worked through three at a time; the rest stay `queued`. Encoding runs one ffmpeg at a time.
+
 ## 0.3.0 (M6: hardening; tightens validation)
 - **`searchBook`: `q` is at most 200 characters** (400 `invalid_request` otherwise). A client that sends longer search text must shorten it.
 - Spending rules: for limits, a request with unknown cost counts at its held-back amount; `resumePlan` and the worker therefore refuse to send it again past the limit (`limit_exceeded`). `resumePlan` also answers `deletion_pending` while the book is scheduled for deletion.

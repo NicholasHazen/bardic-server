@@ -273,6 +273,8 @@ async fn run_import(
     file_name: String,
     actor: Actor,
 ) {
+    // A burst of uploads is worked through a few at a time; the others stay `queued`.
+    let _slot = state.gates.imports.acquire().await.ok();
     run_import_inner(&state, import_id.clone(), book_id, tmp, file_name, actor).await;
     if let Ok(mut set) = state.cancelled_imports.lock() {
         set.remove(&import_id);

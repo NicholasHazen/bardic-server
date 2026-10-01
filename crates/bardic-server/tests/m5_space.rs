@@ -560,6 +560,16 @@ async fn a_scheduled_deletion_survives_a_restart() {
 async fn a_backup_is_a_consistent_database_copy_with_the_media_linked_in() {
     let f = Fx::new().await;
     f.make_all().await;
+    // a source with a key, set directly: the backup must not carry it
+    {
+        let db = rusqlite::Connection::open(f.s.dir.path().join("bardic.db")).unwrap();
+        db.busy_timeout(StdDuration::from_secs(5)).unwrap();
+        db.execute(
+            "UPDATE voice_sources SET config='{\"base_url\":\"http://10.0.0.5:7860\",\"api_key\":\"sekrit-key-123\"}' WHERE id='breeze'",
+            [],
+        )
+        .unwrap();
+    }
     assert_eq!(
         f.s.get("/api/backups", "/api/backups", 200).await["items"]
             .as_array()
@@ -581,8 +591,30 @@ async fn a_backup_is_a_consistent_database_copy_with_the_media_linked_in() {
     }
     assert_eq!(done["state"], "done", "{done}");
     assert_eq!(done["id"], b["id"]);
-    let dir = std::path::PathBuf::from(done["path"].as_str().unwrap());
+    // clients are told a place inside the data folder, not where the server keeps it
+    assert_eq!(
+        done["path"],
+        format!("backups/{}", b["id"].as_str().unwrap())
+    );
+    let dir = f.s.dir.path().join(done["path"].as_str().unwrap());
     assert!(done["bytes"].as_i64().unwrap() > 1000);
+    let raw = std::fs::read(dir.join("bardic.db")).unwrap();
+    assert!(
+        !raw.windows(14).any(|w| w == b"sekrit-key-123"),
+        "the backup file still holds the key somewhere"
+    );
+    let live = rusqlite::Connection::open(f.s.dir.path().join("bardic.db")).unwrap();
+    let kept: String = live
+        .query_row(
+            "SELECT config FROM voice_sources WHERE id='breeze'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        kept.contains("sekrit-key-123"),
+        "the live database keeps its key"
+    );
 
     // the copy opens, and holds the book
     let conn = rusqlite::Connection::open_with_flags(
@@ -956,5 +988,84 @@ async fn a_real_ffmpeg_makes_a_playable_m4b_with_chapter_markers() {
         (dur - prev_end).abs() < 0.5,
         "chapters end at {prev_end}s but the file is {dur}s"
     );
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn asking_for_an_export_or_a_backup_again_returns_the_one_under_way() {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = tempfile::tempdir().unwrap();
+    let path = tools.path().join("slow-ffmpeg");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n[ \"$1\" = \"-version\" ] && exit 0\nsleep 1\nfor a in \"$@\"; do last=\"$a\"; done\nprintf M4B > \"$last\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ff = path.to_string_lossy().to_string();
+    let f = Fx::with(move |c| c.ffmpeg = ff).await;
+    f.make_all().await;
+    let ex = format!("/api/audiobooks/{}/exports", f.audiobook);
+    let tpl = "/api/audiobooks/{audiobook_id}/exports";
+    let a =
+        f.s.call(Method::POST, tpl, &ex, Some(DEVICE), None, 202)
+            .await;
+    let b =
+        f.s.call(Method::POST, tpl, &ex, Some(DEVICE), None, 202)
+            .await;
+    assert_eq!(
+        a["id"], b["id"],
+        "the second request must not start a second ffmpeg"
+    );
+    let id = a["id"].as_str().unwrap().to_string();
+    for _ in 0..200 {
+        let e =
+            f.s.get(
+                "/api/exports/{export_id}",
+                &format!("/api/exports/{id}"),
+                200,
+            )
+            .await;
+        if e["state"] != "running" {
+            assert_eq!(e["state"], "ready");
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+    }
+    // once it has finished a new export is a new one
+    let c =
+        f.s.call(Method::POST, tpl, &ex, Some(DEVICE), None, 202)
+            .await;
+    assert_ne!(c["id"], a["id"]);
+
+    // a backup recorded as running (as if one were under way) is returned, not doubled
+    let db = rusqlite::Connection::open(f.s.dir.path().join("bardic.db")).unwrap();
+    db.busy_timeout(StdDuration::from_secs(5)).unwrap();
+    db.execute("UPDATE backups SET state='done' WHERE state='running'", [])
+        .unwrap();
+    db.execute(
+        "INSERT INTO backups(id,state,created_at) VALUES('01RUNNINGBACKUP','running','2026-01-15T11:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    let r =
+        f.s.call(
+            Method::POST,
+            "/api/backups",
+            "/api/backups",
+            Some(DEVICE),
+            None,
+            202,
+        )
+        .await;
+    assert_eq!(r["id"], "01RUNNINGBACKUP");
+    let n: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM backups WHERE state='running'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
     f.s.stop().await;
 }
