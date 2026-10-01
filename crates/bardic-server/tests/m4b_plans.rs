@@ -1043,3 +1043,75 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+#[tokio::test]
+async fn estimates_double_when_google_doubles_its_rates_unless_the_owner_set_the_price_after() {
+    let f = Fx::new().await;
+    let before = micros(&f.whole().await["cost"]["likely"]);
+    // 2026-01-15 plus 352 days is 2027-01-02
+    f.s.clock.advance(Duration::days(352));
+    let after = f.whole().await;
+    assert_eq!(micros(&after["cost"]["likely"]), before * 2, "{after}");
+    // an approval of an estimate made before the change would be refused as changed; the new one works
+    let space =
+        f.s.get(
+            "/api/audiobooks/{audiobook_id}/space",
+            &format!("/api/audiobooks/{}/space", f.audiobook),
+            200,
+        )
+        .await;
+    assert!(
+        space["remake_estimate"].is_null() || space["remake_estimate"]["likely"]["micros"].is_i64()
+    );
+    // the owner sets the price after the change: taken as meant, not doubled again
+    f.s.put(
+        "/api/prices/{provider}",
+        "/api/prices/gemini",
+        json!({ "unit": "million_characters", "per_unit": money(25_000_000) }),
+        200,
+    )
+    .await;
+    let set = f.whole().await;
+    assert_eq!(micros(&set["cost"]["likely"]), before, "{set}");
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn a_plan_running_after_the_change_holds_back_the_doubled_amount() {
+    let f = Fx::new().await;
+    f.s.clock.advance(Duration::days(352));
+    f.g.state.lock().unwrap().statuses = vec![500];
+    let est = f
+        .preview(
+            json!({ "kind": "chapters", "chapter_ids": [f.chapters[0]] }),
+            200,
+        )
+        .await;
+    let id = f.approve(&est, micros(&est["suggested_limit"]), 201).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stuck = f.wait(&id, &["needs_you"]).await;
+    assert_eq!(stuck["spent"]["unknown_items"], 1);
+    // the unknown request was held at its high estimate at the new rate: more than the old rate
+    let db_dir = f.s.dir.path().join("bardic.db");
+    let db = rusqlite::Connection::open(db_dir).unwrap();
+    let held: i64 = db
+        .query_row(
+            "SELECT reserved FROM spend WHERE status='unknown'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let old_rate_chunk_high = plans_high(f.chars[0].min(400), 25_000_000);
+    assert!(
+        held > old_rate_chunk_high,
+        "held {held} should exceed {old_rate_chunk_high}, the same request at the old rate"
+    );
+    f.s.stop().await;
+}
+
+fn plans_high(chars: i64, per_million: i64) -> i64 {
+    let likely = (chars * per_million + 999_999) / 1_000_000;
+    (likely * 140 + 99) / 100
+}

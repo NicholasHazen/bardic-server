@@ -380,11 +380,16 @@ fn load_ctx(
         )
         .optional()?
         .is_some();
-    let price: i64 = conn.query_row(
-        "SELECT COALESCE((SELECT per_unit FROM prices WHERE provider=?1),0)",
+    let (price, price_as_of): (i64, String) = conn.query_row(
+        "SELECT COALESCE((SELECT per_unit FROM prices WHERE provider=?1),0), COALESCE((SELECT as_of FROM prices WHERE provider=?1),'')",
         [&source],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    let price = if source == "gemini" {
+        crate::api::money::effective_gemini_price(price, &price_as_of, at)
+    } else {
+        price
+    };
     conn.execute("UPDATE jobs SET state='running', current_chapter_id=?2, updated_at=?3 WHERE id=?1 AND state='queued'", params![job_id, chapter_id, at])?;
     conn.execute(
         "UPDATE jobs SET current_chapter_id=?2 WHERE id=?1",

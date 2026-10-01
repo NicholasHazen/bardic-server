@@ -139,6 +139,7 @@ fn quote(
     audiobook: &str,
     book: &str,
     scope: &ScopeIn,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Quote, ApiError> {
     let chosen = resolve_scope(conn, book, scope)?;
     let (mut make, mut reused, mut chars) = (vec![], 0, 0i64);
@@ -159,6 +160,7 @@ fn quote(
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let per_unit = money::effective_gemini_price(per_unit, &as_of, &crate::clock::ts(now));
     Ok(Quote {
         chapter_ids: make,
         reused,
@@ -202,7 +204,7 @@ pub async fn preview(
         .run(move |c| {
             let tx = c.transaction()?;
             let t = premium_target(&tx, &audiobook)?;
-            let q = quote(&tx, &audiobook, &t.book_id, &input.scope)?;
+            let q = quote(&tx, &audiobook, &t.book_id, &input.scope, now)?;
             let suggested = plans::suggested_limit(q.range.high);
             let left = remaining(&tx, now)?;
             let blocked = match left {
@@ -300,7 +302,7 @@ pub async fn create(
             }
             let scope_json: String = tx.query_row("SELECT scope FROM estimates WHERE id=?1", [&input.estimate_id], |r| r.get(0))?;
             let scope: ScopeIn = serde_json::from_str(&scope_json).map_err(ApiError::internal)?;
-            let now_q = quote(&tx, &audiobook, &t.book_id, &scope)?;
+            let now_q = quote(&tx, &audiobook, &t.book_id, &scope, now)?;
             if now_q.chapter_ids != chapter_ids || now_q.range.likely < low || now_q.range.likely > high {
                 return Err(ApiError::conflict("estimate_changed", "The chapters or the prices changed since this estimate. Preview again."));
             }

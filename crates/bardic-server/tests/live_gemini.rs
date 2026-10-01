@@ -227,3 +227,131 @@ async fn a_real_gemini_sample_and_a_tiny_plan_under_five_cents() {
     assert_eq!(p["spent"]["unknown_items"], 0, "{p}");
     assert!(actual <= LIMIT_MICROS, "spent over the limit");
 }
+
+/// A longer chapter (about 1,200 characters of original prose with dialogue and paragraph
+/// breaks) to measure audio tokens per character, seconds per character and cost per character,
+/// which the price table's estimate is built on. Limit $0.05; refuses to start above it.
+#[tokio::test]
+#[ignore = "PAID: about $0.03 for one plan of ~1,200 characters, limit $0.05"]
+async fn a_real_gemini_long_chapter_measures_the_cost_per_character() {
+    let s = TestServer::start_with(tempfile::tempdir().unwrap(), |c| {
+        c.gemini_url = "https://generativelanguage.googleapis.com".to_string();
+    })
+    .await;
+    let l = s.listener("Live").await;
+    s.act_as(&l);
+    let src = s
+        .put(
+            "/api/voice-sources/{source_id}",
+            "/api/voice-sources/gemini",
+            json!({ "api_key": key() }),
+            200,
+        )
+        .await;
+    assert_eq!(src["state"], "connected");
+    let voice = s
+        .get("/api/voices", "/api/voices?source_id=gemini", 200)
+        .await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "Kore")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let text = "Chapter Two\n\n\
+The ferry left the dock at dusk, and nobody on it spoke for the first mile. The water was flat and dark, and the lamps along the far bank looked like a string of small, patient moons.\n\n\
+\"You've done this crossing before,\" the ferryman said at last, without turning round.\n\n\
+\"Twice,\" said Ines. \"Both times in the other direction.\"\n\n\
+He laughed, a short dry sound, and shifted his grip on the long pole. \"Then you know the secret of it. The river doesn't care which way you're going. It only cares that you keep going.\"\n\n\
+She thought about that while the lamps grew larger. Somewhere behind them a bell rang, once, and the sound travelled out over the water and was gone. By the time the hull touched the far landing her hands had stopped shaking, and the town above the bank had begun to put its lights out, one window after another.\n";
+    let book = s.add_book("long.txt", text.as_bytes().to_vec()).await;
+    let ab = s
+        .post(
+            "/api/books/{book_id}/audiobooks",
+            &format!("/api/books/{book}/audiobooks"),
+            json!({ "voice_id": voice }),
+            201,
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let est = s
+        .post(
+            "/api/audiobooks/{audiobook_id}/plan-preview",
+            &format!("/api/audiobooks/{ab}/plan-preview"),
+            json!({ "scope": { "kind": "whole_book" } }),
+            200,
+        )
+        .await;
+    let chars = est["text_characters"].as_i64().unwrap();
+    let (low, likely, high) = (
+        micros(&est["cost"]["low"]),
+        micros(&est["cost"]["likely"]),
+        micros(&est["cost"]["high"]),
+    );
+    eprintln!(
+        "estimate: {chars} chars, {} chapter(s), low {low} likely {likely} high {high} micros",
+        est["chapters_to_make"]
+    );
+    assert!(high <= LIMIT_MICROS, "the high estimate is over $0.05");
+    let plan = s
+        .post(
+            "/api/plans",
+            "/api/plans",
+            json!({ "estimate_id": est["estimate_id"], "limit": money(LIMIT_MICROS) }),
+            201,
+        )
+        .await;
+    let id = plan["id"].as_str().unwrap().to_string();
+    let mut p = plan;
+    for _ in 0..720 {
+        p = s
+            .get("/api/plans/{plan_id}", &format!("/api/plans/{id}"), 200)
+            .await;
+        if !["approved", "running"].contains(&p["state"].as_str().unwrap()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let actual = micros(&p["spent"]["known"]);
+    eprintln!(
+        "plan: {} spent {actual} micros, {} unknown",
+        p["state"], p["spent"]["unknown_items"]
+    );
+    let items = s
+        .get(
+            "/api/audiobooks/{audiobook_id}/chapters",
+            &format!("/api/audiobooks/{ab}/chapters"),
+            200,
+        )
+        .await["items"]
+        .clone();
+    let ms = items[0]["audio"]["duration_ms"].as_i64().unwrap_or(0);
+    let dir = s.stop().await;
+    let db = rusqlite::Connection::open(dir.path().join("bardic.db")).unwrap();
+    let (tin, tout): (i64, i64) = db
+        .query_row(
+            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM spend WHERE status='known'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    eprintln!(
+        "measured over {chars} chars: {:.2}s audio ({:.1} chars/s), {tout} audio tokens ({:.2}/char, {:.1}/s), {tin} text tokens ({:.2}/char)",
+        ms as f64 / 1000.0,
+        chars as f64 / (ms as f64 / 1000.0),
+        tout as f64 / chars as f64,
+        tout as f64 / (ms as f64 / 1000.0),
+        tin as f64 / chars as f64
+    );
+    eprintln!(
+        "cost per million characters: {:.2} USD (table: 25.00); estimate range {low}..{high}, actual {actual}: {}",
+        actual as f64 / chars as f64,
+        if (low..=high).contains(&actual) { "inside" } else { "OUTSIDE" }
+    );
+    assert_eq!(p["state"], "completed", "{p}");
+    assert!(actual <= LIMIT_MICROS);
+}

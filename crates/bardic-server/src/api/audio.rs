@@ -854,11 +854,12 @@ async fn premium_sample(
     let denied = state
         .store
         .run(move |c| {
-            let price: i64 = c.query_row(
-                "SELECT per_unit FROM prices WHERE provider='gemini'",
+            let (price, as_of): (i64, String) = c.query_row(
+                "SELECT per_unit,as_of FROM prices WHERE provider='gemini'",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            let price = super::money::effective_gemini_price(price, &as_of, &crate::clock::ts(now));
             let amount = plans::estimate(SAMPLE_TEXT.chars().count() as i64, price)
                 .high
                 .max(1);
