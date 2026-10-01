@@ -92,6 +92,14 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
     else {
         return Err(book_not_found());
     };
+    if state == "deleting" {
+        return Err(book_not_found());
+    }
+    let audiobooks: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audiobooks WHERE book_id=?1",
+        [&id],
+        |r| r.get(0),
+    )?;
     let place = match viewer {
         Some(v) => places::summary(conn, v, &id)?,
         None => Value::Null,
@@ -108,7 +116,7 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
         "word_count": words,
         "source_sha256": sha,
         "place": place,
-        "audiobook_count": 0,
+        "audiobook_count": audiobooks,
     }))
 }
 

@@ -1,14 +1,17 @@
 //! HTTP handlers, grouped as the contract's tags.
 
+pub mod admin;
 pub mod audio;
 pub mod audiobooks;
 pub mod audit;
 pub mod books;
+pub mod exports;
 pub mod imports;
 pub mod listeners;
 pub mod money;
 pub mod places;
 pub mod plans;
+pub mod space;
 pub mod system;
 pub mod voices;
 

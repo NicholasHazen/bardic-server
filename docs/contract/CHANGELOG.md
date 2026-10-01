@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.2.6 (M5: space, offline, deletion, export, backup; additive)
+- `downloadExport` documents `206`.
+- Behaviour documented for `freeAudiobookSpace`, `checkDownloads`, `scheduleBookDeletion`, `createExport` and `createBackup`. New codes: `encoder_missing`, `export_not_ready`, `export_not_found`, `export_failed` (job detail), `deletion_pending`, `job_running` on deletion.
+- `Book.audiobook_count` is now the real count (it was always 0 before).
+
 ## 0.2.5 (M4b/c: plans and paid audio; descriptions only)
 - Plan operations, spending rules and their codes are documented: `plan_not_needed`, `estimate_not_found`, `estimate_used`, `nothing_to_make`, `plan_active`, `plan_not_resumable`, `provider_uncertain`, `provider_quota`.
 - A plan's `state` mirrors its job: queued and running are both `running`; `approved` is never returned.

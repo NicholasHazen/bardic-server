@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.5
+  version: 0.2.6
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -1150,7 +1150,10 @@ paths:
       description: |
         Deletes audio on the server; keeps the book, places, plans, audit and
         downloads on devices. Returns the freed bytes. Refuses while a job is
-        running for it (409 `job_running`).
+        running for it (409 `job_running`). The records of the freed audio (size,
+        revision, duration) are kept, so `checkDownloads` can still describe a
+        copy a device holds. For a premium voice, see `getAudiobookSpace` for what
+        making it again costs.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
@@ -1637,8 +1640,12 @@ paths:
       summary: Which downloaded chapters are out of date
       description: |
         The device sends what it holds. For every chapter whose audio has been
-        made again, the response says what changed, so the client can show the
+        made again (later, by the same voice, in this or a newer audiobook of the
+        book), the response says what changed, so the client can show the
         comparison and let the listener decide. Read-only; nothing is replaced.
+        A held copy whose server copy was only freed, or that this server has
+        never heard of, is listed as up to date: a kept copy keeps playing.
+        404 `chapter_not_found` for a chapter of another book.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -1692,8 +1699,10 @@ paths:
       description: |
         Hides the book immediately and schedules irreversible deletion of the
         book, its audio, places, history and plans `delay_seconds` later (default
-        and minimum 60). The schedule is stored and survives restarts. Cancel with
-        `cancelBookDeletion`. Audited.
+        and minimum 60, at most 7 days). The schedule is stored and survives
+        restarts. Cancel with `cancelBookDeletion`. Audited. The spending ledger
+        and the audit log are kept. Errors (409): `job_running` (audio is being
+        made for the book), `deletion_pending`, `book_adding`.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Listener'}, {$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -1735,7 +1744,11 @@ paths:
       summary: Export an audiobook as one audio file with chapters
       description: |
         Starts a job that encodes the ready chapters into one M4B with chapter
-        markers. Refuses if no chapter is ready (409 `nothing_ready`).
+        markers, using `ffmpeg` on the Bardic computer. Chapters not made yet are
+        left out. Errors (409): `nothing_ready`, `encoder_missing` (no ffmpeg).
+        A failed export has job state `failed` with `needs_you.code`
+        `export_failed`. `downloadExport` is 409 `export_not_ready` until the
+        export is `ready`, and supports `Range`.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       requestBody:
@@ -1789,6 +1802,11 @@ paths:
           content:
             audio/mp4:
               schema: {type: string, format: binary}
+        '206':
+          description: Partial file (the request had a `Range` header).
+          content:
+            audio/mp4:
+              schema: {type: string, format: binary}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /api/backups:
@@ -1816,9 +1834,13 @@ paths:
       tags: [Admin]
       summary: Make a consistent backup while running
       description: |
-        Writes a point-in-time copy of the database and audio index to the
-        server's backup folder. Audio files are immutable and referenced, not
-        copied twice. Returns a job-like `Backup`.
+        Writes a point-in-time copy of the database (one consistent snapshot) to
+        `backups/<id>/bardic.db` in the data folder, and links the original books
+        and the finished audio into `backups/<id>/media/`. Media files are
+        immutable, so they are hard links (a copy where the filesystem cannot
+        link), not second copies. The backup is a folder on the same computer: copy
+        it elsewhere to survive a lost disk. Returns a job-like `Backup`; poll
+        `listBackups` for `done`.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:

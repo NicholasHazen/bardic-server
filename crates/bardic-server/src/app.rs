@@ -436,6 +436,34 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plans/{plan_id}/resume", post(api::plans::resume))
         .route("/api/plans/{plan_id}/stop", post(api::plans::stop))
         .route(
+            "/api/audiobooks/{audiobook_id}/space",
+            get(api::space::get_space).delete(api::space::free_space),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}/manifest",
+            get(api::space::manifest),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}/sync-check",
+            post(api::space::sync_check),
+        )
+        .route(
+            "/api/books/{book_id}/deletion",
+            get(api::admin::get_deletion)
+                .post(api::admin::schedule)
+                .delete(api::admin::cancel),
+        )
+        .route(
+            "/api/backups",
+            get(api::admin::list_backups).post(api::admin::create_backup),
+        )
+        .route(
+            "/api/audiobooks/{audiobook_id}/exports",
+            post(api::exports::create),
+        )
+        .route("/api/exports/{export_id}", get(api::exports::get_one))
+        .route("/api/exports/{export_id}/file", get(api::exports::download))
+        .route(
             "/api/allowance",
             get(api::money::get_allowance).put(api::money::put_allowance),
         )

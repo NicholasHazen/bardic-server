@@ -82,7 +82,7 @@ fn chapter_index(conn: &Connection, book: &str, chapter: &str) -> Result<i64, Ap
 pub fn has_audio(conn: &Connection, audiobook: &str, chapter: &str) -> Result<bool, ApiError> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM audio WHERE audiobook_id=?1 AND chapter_id=?2",
+            "SELECT 1 FROM audio WHERE audiobook_id=?1 AND chapter_id=?2 AND deleted_at IS NULL",
             [audiobook, chapter],
             |_| Ok(()),
         )
@@ -581,7 +581,7 @@ fn parse_range(h: Option<&str>, len: u64) -> Option<Result<(u64, u64), ()>> {
     })
 }
 
-async fn file_response(
+pub async fn file_response_pub(
     path: std::path::PathBuf,
     content_type: &str,
     etag: &str,
@@ -635,7 +635,7 @@ pub async fn get_audio(
         .store
         .run(move |c| {
             Ok(c.query_row(
-                "SELECT path,content_type FROM audio WHERE id=?1",
+                "SELECT path,content_type FROM audio WHERE id=?1 AND deleted_at IS NULL",
                 [&key],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -644,7 +644,7 @@ pub async fn get_audio(
         .await?;
     let (path, ct) = row.ok_or_else(audio_not_found)?;
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-    file_response(state.store.data_dir().join(path), &ct, &id, range, true).await
+    file_response_pub(state.store.data_dir().join(path), &ct, &id, range, true).await
 }
 
 /// `getAudioTimings`
@@ -656,12 +656,12 @@ pub async fn get_timings(
     let t: Option<String> = state
         .store
         .run(move |c| {
-            Ok(
-                c.query_row("SELECT timings FROM audio WHERE id=?1", [&key], |r| {
-                    r.get(0)
-                })
-                .optional()?,
+            Ok(c.query_row(
+                "SELECT timings FROM audio WHERE id=?1 AND deleted_at IS NULL",
+                [&key],
+                |r| r.get(0),
             )
+            .optional()?)
         })
         .await?;
     let lines: Value =
@@ -717,7 +717,7 @@ pub async fn voice_sample(
         })
         .await?;
     if let Some(p) = cached {
-        if let Ok(resp) = file_response(
+        if let Ok(resp) = file_response_pub(
             state.store.data_dir().join(p),
             "audio/wav",
             &format!("{voice_id}-{revision}"),
@@ -826,7 +826,7 @@ pub async fn voice_sample(
             Ok(())
         })
         .await?;
-    file_response(
+    file_response_pub(
         full,
         "audio/wav",
         &format!("{voice_id}-{revision}"),
@@ -993,7 +993,7 @@ async fn premium_sample(
             Ok(())
         })
         .await?;
-    file_response(
+    file_response_pub(
         full,
         "audio/wav",
         &format!("{voice_id}-{revision}"),

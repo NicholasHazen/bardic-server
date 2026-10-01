@@ -48,6 +48,10 @@ pub struct Config {
     )]
     pub gemini_url: String,
 
+    /// The ffmpeg program used to encode exports.
+    #[arg(long, env = "BARDIC_FFMPEG", default_value = "ffmpeg", hide = true)]
+    pub ffmpeg: String,
+
     /// First wait, in milliseconds, before retrying an unreachable voice server (doubles each try).
     #[arg(long, env = "BARDIC_JOB_RETRY_MS", default_value_t = 2000, hide = true)]
     pub job_retry_ms: u64,
@@ -63,6 +67,7 @@ impl Config {
             server_name: Some("Test Bardic".to_string()),
             audio_chunk_chars: 2500,
             job_retry_ms: 2000,
+            ffmpeg: "ffmpeg".to_string(),
             gemini_url: "http://127.0.0.1:1".to_string(),
         }
     }

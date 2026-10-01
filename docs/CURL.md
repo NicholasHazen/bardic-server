@@ -134,6 +134,25 @@ curl -s $B/api/allowance; curl -s $B/api/prices
 curl -s -X PUT -H "$D" -H "$L" -H "$J" -d '{"monthly_limit":{"micros":25000000,"currency":"USD"},"default_plan_limit":{"micros":10000000,"currency":"USD"}}' $B/api/allowance
 ```
 
+## Offline, space, deletion, export, backup (M5)
+```sh
+curl -s $B/api/audiobooks/$AB/manifest                  # ready chapters: audio id, size, sha256, text hash
+curl -s -X POST -H "$D" -H "$J" -d '{"have":[{"chapter_id":"<id>","audio_id":"<id>"}]}' $B/api/audiobooks/$AB/sync-check
+curl -s $B/api/audiobooks/$AB/space                     # bytes used; remake cost for premium
+curl -s -X DELETE -H "$D" $B/api/audiobooks/$AB/space   # free the audio (book, places, plans stay)
+# Permanent deletion: hidden now, gone after at least 60 seconds, undoable until then
+curl -s -X POST -H "$D" -H "$L" $B/api/books/$BOOK/deletion
+curl -s -X DELETE -H "$D" -H "$L" $B/api/books/$BOOK/deletion
+curl -s -X POST -H "$D" $B/api/audiobooks/$AB/exports   # needs ffmpeg; then GET /api/exports/<id> and /file
+curl -s -X POST -H "$D" $B/api/backups; curl -s $B/api/backups
+```
+
+## Checking against your real Breeze server
+```sh
+BARDIC_LIVE_BREEZE_URL=http://host:7860 cargo test --test live_breeze -- --ignored --nocapture
+```
+It makes one voice sample and one chapter of about 120 characters and prints what it measured.
+
 ## Browsers on another address
 
 ```sh

@@ -374,7 +374,7 @@ fn load_ctx(
         .collect::<Result<Vec<_>, _>>()?;
     let has_audio = conn
         .query_row(
-            "SELECT 1 FROM audio WHERE audiobook_id=?1 AND chapter_id=?2",
+            "SELECT 1 FROM audio WHERE audiobook_id=?1 AND chapter_id=?2 AND deleted_at IS NULL",
             [&audiobook_id, chapter_id],
             |_| Ok(()),
         )
@@ -928,7 +928,7 @@ async fn finalize_idle(state: &AppState) -> Result<(), ApiError> {
             // A job waiting on a quota goes back in the queue when its time comes.
             c.execute("UPDATE jobs SET state='queued', waiting=NULL, wake_at=NULL, updated_at=?1 WHERE state='waiting' AND wake_at IS NOT NULL AND wake_at<=?1", [&at])?;
             let ids: Vec<String> = c
-                .prepare("SELECT id FROM jobs WHERE state IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM job_items WHERE job_id=jobs.id AND state='queued')")?
+                .prepare("SELECT id FROM jobs WHERE kind='make_audio' AND state IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM job_items WHERE job_id=jobs.id AND state='queued')")?
                 .query_map([], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
             for id in &ids {
@@ -968,8 +968,12 @@ pub async fn run_worker(state: AppState) {
     let _ = state
         .store
         .run(|c| {
-            c.execute("UPDATE jobs SET state='queued', current_chapter_id=NULL WHERE state='running' OR (state='waiting' AND wake_at IS NULL)", [])?;
+            c.execute("UPDATE jobs SET state='queued', current_chapter_id=NULL WHERE kind='make_audio' AND (state='running' OR (state='waiting' AND wake_at IS NULL))", [])?;
             spend::recover(c)?;
+            // An export or backup that was running did not finish.
+            c.execute("UPDATE exports SET state='failed', error='The server stopped while exporting. Export again.' WHERE state='running'", [])?;
+            c.execute("UPDATE jobs SET state='failed' WHERE kind='export' AND state IN ('queued','running')", [])?;
+            c.execute("UPDATE backups SET state='failed', error='The server stopped during the backup.' WHERE state='running'", [])?;
             Ok(())
         })
         .await;
@@ -979,6 +983,9 @@ pub async fn run_worker(state: AppState) {
         if last_refresh.elapsed() >= Duration::from_secs(24 * 3600) {
             last_refresh = tokio::time::Instant::now();
             crate::api::voices::refresh_all(&state).await;
+        }
+        if let Err(e) = crate::maintenance::run_due_deletions(&state).await {
+            tracing::error!(error = %e.detail, "running deletions");
         }
         if let Err(e) = finalize_idle(&state).await {
             tracing::error!(error = %e.detail, "finalizing jobs");
@@ -993,7 +1000,12 @@ pub async fn run_worker(state: AppState) {
             Ok(None) => {
                 // While a job waits for a quota, look again every second; otherwise sleep until poked.
                 let waiting = state.store.run(|c| Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE state='waiting' AND wake_at IS NOT NULL)", [], |r| r.get::<_, bool>(0))?)).await.unwrap_or(false);
-                let nap = Duration::from_secs(if waiting { 1 } else { 30 });
+                let deleting = state
+                    .store
+                    .run(|c| Ok(crate::maintenance::pending(c)))
+                    .await
+                    .unwrap_or(false);
+                let nap = Duration::from_secs(if waiting || deleting { 1 } else { 30 });
                 tokio::select! {
                     _ = state.jobs.wake.notified() => {}
                     _ = shutdown.changed() => {}

@@ -25,8 +25,8 @@ pub fn audiobook_value(conn: &Connection, id: &str) -> Result<Value, ApiError> {
     let row = conn
         .query_row(
             "SELECT a.id,a.book_id,a.voice_id,a.voice_name,v.source_id,v.tier,a.voice_revision,a.created_at,b.chapter_total,
-                    (SELECT COUNT(*) FROM audio x WHERE x.audiobook_id=a.id),
-                    (SELECT COALESCE(SUM(bytes),0) FROM audio x WHERE x.audiobook_id=a.id),
+                    (SELECT COUNT(*) FROM audio x WHERE x.audiobook_id=a.id AND x.deleted_at IS NULL),
+                    (SELECT COALESCE(SUM(bytes),0) FROM audio x WHERE x.audiobook_id=a.id AND x.deleted_at IS NULL),
                     (SELECT j.id FROM jobs j WHERE j.audiobook_id=a.id AND j.state IN ('queued','running','waiting','paused','needs_you') ORDER BY j.created_at DESC LIMIT 1)
              FROM audiobooks a JOIN voices v ON v.id=a.voice_id
              JOIN (SELECT book_id, COUNT(*) AS chapter_total FROM chapters GROUP BY book_id) b ON b.book_id=a.book_id
@@ -217,7 +217,7 @@ pub fn chapter_states(c: &Connection, id: &str) -> Result<Value, ApiError> {
     for ch in chapter_ids {
         let audio = c
             .query_row(
-                &format!("SELECT {AUDIO_COLS} FROM audio WHERE audiobook_id=?1 AND chapter_id=?2"),
+                &format!("SELECT {AUDIO_COLS} FROM audio WHERE audiobook_id=?1 AND chapter_id=?2 AND deleted_at IS NULL"),
                 [id, &ch],
                 |r| audio_ref(r, 0),
             )
@@ -226,7 +226,7 @@ pub fn chapter_states(c: &Connection, id: &str) -> Result<Value, ApiError> {
             .query_row(
                 &format!(
                     "SELECT {} FROM audio x JOIN audiobooks a ON a.id=x.audiobook_id
-                     WHERE a.book_id=?1 AND a.voice_id=?2 AND a.created_at>?3 AND x.chapter_id=?4 ORDER BY a.created_at DESC LIMIT 1",
+                     WHERE a.book_id=?1 AND a.voice_id=?2 AND a.created_at>?3 AND x.chapter_id=?4 AND x.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT 1",
                     AUDIO_COLS.split(',').map(|c| format!("x.{c}")).collect::<Vec<_>>().join(",")
                 ),
                 params![book, voice_id, created, ch],

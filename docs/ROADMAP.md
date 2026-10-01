@@ -9,7 +9,7 @@ Milestones end with exit criteria that can be checked against the spec's accepta
 | M2 (done) | Places | `putPlace` with revisions and conflicts, history, finished (marked and automatic), place notices. | P5 and P7, C1 to C7, D1 and C6 tests pass, including the fake clock boundary. |
 | M3 (done) | Free audio | Voice sources `breeze` and `local`; audiobooks; jobs, pacing, recovery; audio delivery with ranges; timings; `requestChapterAudio`, `makeAudiobookReady`. | P3 crash test passes. First audio and resume targets met on the reference machine. |
 | M4 (done) | Premium audio and money | `gemini` source; prices; `previewPlan`, `createPlan`, plan state machine, Allowance, spend with unknowns, quotas as `waiting`. | P2 and P6, D9 and PL1 to PL11 tests pass against a fake provider; one bounded, authorised live check. |
-| M5 | Offline, space, deletion, export | Manifest, `checkDownloads`, newer audio, free up space, scheduled deletion with undo, M4B export, backup. | O1 to O8 server-side tests, D6 and G2 to G4 tests pass. |
+| M5 (done) | Offline, space, deletion, export | Manifest, `checkDownloads`, newer audio, free up space, scheduled deletion with undo, M4B export, backup. | O1 to O8 server-side tests, D6 and G2 to G4 tests pass. |
 | M6 | Hardening | Content refusals, provider edge cases, restart and quota soak, security review, performance targets at 500 books. | Spec section 10 targets met; open items in spec section 15 closed or scheduled. |
 
 Out of scope until the spec changes: characters, casting, performances, voice design and cloning, roles and passwords, notifications.
@@ -66,3 +66,10 @@ Out of scope until the spec changes: characters, casting, performances, voice de
 - **Gemini has no sentence timings**, so read-along timings for premium audio are spread by line length and less exact than Breeze's.
 - **Decisions on the spec's open items:** "success with no audio" counts as spent (known if usage is reported, else unknown) and fails the chapter without an automatic retry; three failed chapters in a row stop a plan (`repeated_failure`). No provider price interface is connected (see M4a).
 - Not built: the local request pacer, invoice reconciliation, `getAudiobookSpace` remake estimates (M5).
+
+## Notes from M5
+- **Freed audio keeps its record** (`audio.deleted_at`, file and path gone), so `checkDownloads` can compare what a device holds with what replaced it. A copy the server freed but did not remake is reported up to date.
+- **Deletion** is a stored schedule (`deletions`), run by the worker loop (checked every second while one is pending; also at startup). It refuses to schedule while audio is being made for the book. A finished deletion keeps its row so `deletion_done` can be answered. Rows go first, files after: a crash leaves orphan files, never a book without files. The spend ledger and audit log are kept.
+- **Backup** is `VACUUM INTO` (one consistent snapshot; it holds the database connection for the duration, which is short for a household library) plus hard links of originals, audio and samples. It is on the same disk: a copy elsewhere is the owner's job. There is no restore operation; to restore, stop the server and replace `bardic.db` and the media folders from the backup folder.
+- **Export** needs `ffmpeg` (`BARDIC_FFMPEG` to point at it): concat of the WAV chapters, FFMETADATA chapter markers, AAC 64 kb/s mono in an `ipod` (M4B) container. Not run against real ffmpeg yet; tests use a stub that records its arguments. No cover art in the file yet. This is also the answer to the WAV size problem for downloads of a whole book, but not for per-chapter offline downloads, which are still WAV.
+- `tests/live_breeze.rs` is a bounded check for a real Breeze server (ignored by default): see the file header.

@@ -113,7 +113,10 @@ async fn speech(State(f): State<Shared>, Json(body): Json<Value>) -> Response {
     let text: Vec<char> = body["input"].as_str().unwrap_or("").chars().collect();
     f.lock().unwrap().spoken.push(text.iter().collect());
     let total_ms = text.len() as i64 * 10;
-    let pcm = vec![1u8; (total_ms as usize) * 48];
+    // a constant tone-like level, so the audio is not silent
+    let pcm: Vec<u8> = (0..(total_ms as usize) * 48)
+        .map(|i| if i % 2 == 0 { 0x00 } else { 0x40 })
+        .collect();
     let mut sse = String::new();
     let mut start = 0usize;
     let mut i = 0;
