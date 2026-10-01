@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.3.2
+  version: 0.3.3
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -928,8 +928,8 @@ paths:
       description: |
         Free voices cost nothing. A premium sample is a short real request: it
         counts toward spending and is cached per voice revision, so a repeat is
-        free. Supports `Range` (206). Premium samples arrive with premium audio;
-        until then a Gemini voice answers 409 `source_not_set_up`. A free voice
+        free. Supports `Range` (206). A Gemini voice needs a working key: without
+        one it answers 409 `source_not_set_up`. A free voice
         whose server has changed it since the last refresh answers 409
         `voice_changed`; a busy server answers 429 `rate_limited`. Errors: `source_not_set_up` (409), `key_rejected` (409),
         `provider_quota` (429).

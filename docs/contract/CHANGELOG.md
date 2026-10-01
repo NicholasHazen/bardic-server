@@ -2,6 +2,9 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.3.3 (description only)
+- `getVoiceSample`: removed the stale line saying premium samples arrive with premium audio. A Gemini sample works whenever a key is accepted (since M4).
+
 ## 0.3.2 (M6: deletion and audio; behaviour only)
 - `requestChapterAudio`, `makeAudiobookReady`, `resumeJob` and `resumePlan` answer 409 `deletion_pending` while the book is scheduled for deletion. A deletion that comes due stops any job still open for the book, and audio folders that belong to no audiobook are swept at startup and shortly after a deletion.
 
