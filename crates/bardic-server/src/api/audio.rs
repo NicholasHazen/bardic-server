@@ -39,6 +39,23 @@ pub fn target(conn: &Connection, audiobook: &str) -> Result<Target, ApiError> {
     .ok_or_else(|| ApiError::not_found("audiobook_not_found", "No audiobook has this id."))
 }
 
+/// No audio is made for a book that is scheduled for deletion: the work would be lost, or leave
+/// files behind when the deletion runs.
+pub fn require_not_deleting(conn: &Connection, book_id: &str) -> Result<(), ApiError> {
+    let deleting: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM books WHERE id=?1 AND state='deleting')",
+        [book_id],
+        |r| r.get(0),
+    )?;
+    if deleting {
+        return Err(ApiError::conflict(
+            "deletion_pending",
+            "This book is scheduled for deletion. Cancel the deletion before making more audio.",
+        ));
+    }
+    Ok(())
+}
+
 /// Free audio needs a source that is connected now. Premium audio needs an approved plan.
 fn require_ready_to_make(t: &Target) -> Result<(), ApiError> {
     if t.tier == "premium" {
@@ -186,6 +203,7 @@ pub async fn request_chapter(
                 tx.commit()?;
                 return Ok((StatusCode::ACCEPTED, v, true));
             }
+            require_not_deleting(&tx, &t.book_id)?;
             require_ready_to_make(&t)?;
             // The chapter first, then the next few that are not made yet.
             let mut wanted = vec![chapter.clone()];
@@ -338,6 +356,7 @@ pub async fn make_ready(
                 }
             }
             let chosen = resolve_scope(&tx, &t.book_id, &input.scope)?;
+            require_not_deleting(&tx, &t.book_id)?;
             require_ready_to_make(&t)?;
             let mut missing = vec![];
             for ch in chosen {
@@ -491,6 +510,8 @@ async fn transition(
                     }
                     match st.as_str() {
                         "paused" | "needs_you" => {
+                            let book: String = tx.query_row("SELECT book_id FROM jobs WHERE id=?1", [&job], |r| r.get(0))?;
+                            require_not_deleting(&tx, &book)?;
                             tx.execute("UPDATE job_items SET state='queued', detail=NULL WHERE job_id=?1 AND state='failed'", [&job])?;
                             tx.execute("UPDATE jobs SET state='queued', waiting=NULL, needs_you=NULL, updated_at=?2 WHERE id=?1", params![job, at])?;
                             true

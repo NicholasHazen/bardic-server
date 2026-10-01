@@ -991,6 +991,8 @@ pub async fn run_worker(state: AppState) {
         .await;
     let mut shutdown = state.shutdown.subscribe();
     let mut last_refresh = tokio::time::Instant::now();
+    // Leftovers from a crash or a deletion that raced a chapter being written.
+    let _ = crate::maintenance::sweep_orphans(&state).await;
     while !*shutdown.borrow() {
         if last_refresh.elapsed() >= Duration::from_secs(24 * 3600) {
             last_refresh = tokio::time::Instant::now();

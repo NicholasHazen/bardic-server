@@ -36,6 +36,11 @@ fn execute(conn: &mut Connection, book_id: &str, at: &str) -> Result<Vec<PathBuf
     if state.as_deref() != Some("pending") {
         return Ok(vec![]);
     }
+    // Anything still making audio for this book stops now: the work would have nowhere to go.
+    tx.execute(
+        "UPDATE jobs SET state='stopped', waiting=NULL, needs_you=NULL, wake_at=NULL, current_chapter_id=NULL, updated_at=?2 WHERE book_id=?1 AND state IN ('queued','running','waiting','paused','needs_you')",
+        params![book_id, at],
+    )?;
     let mut files: Vec<PathBuf> = vec![PathBuf::from(format!("originals/{book_id}"))];
     let audiobooks: Vec<String> = tx
         .prepare("SELECT id FROM audiobooks WHERE book_id=?1")?
@@ -58,6 +63,43 @@ fn execute(conn: &mut Connection, book_id: &str, at: &str) -> Result<Vec<PathBuf
     Ok(files)
 }
 
+/// Remove audio folders that belong to no audiobook: what a chapter that was still being written
+/// when its book was deleted leaves behind. Safe at any time: a folder is made only for an
+/// audiobook that exists, and its files are not referenced by any row once the audiobook is gone.
+pub async fn sweep_orphans(state: &AppState) -> Result<usize, ApiError> {
+    let root = state.store.data_dir().join("audio");
+    let Ok(mut dir) = tokio::fs::read_dir(&root).await else {
+        return Ok(0);
+    };
+    let mut names = vec![];
+    while let Ok(Some(e)) = dir.next_entry().await {
+        if e.file_type().await.is_ok_and(|t| t.is_dir()) {
+            names.push(e.file_name().to_string_lossy().to_string());
+        }
+    }
+    let orphans = state
+        .store
+        .run(move |c| {
+            let mut out = vec![];
+            for n in names {
+                let known: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM audiobooks WHERE id=?1)",
+                    [&n],
+                    |r| r.get(0),
+                )?;
+                if !known {
+                    out.push(n);
+                }
+            }
+            Ok(out)
+        })
+        .await?;
+    for n in &orphans {
+        let _ = tokio::fs::remove_dir_all(root.join(n)).await;
+    }
+    Ok(orphans.len())
+}
+
 /// Run every deletion that has come due. Called by the worker loop.
 pub async fn run_due_deletions(state: &AppState) -> Result<(), ApiError> {
     let now = state.now();
@@ -74,6 +116,14 @@ pub async fn run_due_deletions(state: &AppState) -> Result<(), ApiError> {
                 tokio::fs::remove_file(&full).await
             };
         }
+        // A chapter that was being written may land after the files were removed: look again shortly.
+        let st = state.clone();
+        tokio::spawn(async move {
+            for wait in [2, 30] {
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                let _ = sweep_orphans(&st).await;
+            }
+        });
         let mut n = Notice::new("deletion.updated", state.now()).with_id(book.clone());
         n.book_id = Some(book);
         state.notify(n);

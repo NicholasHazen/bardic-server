@@ -1069,3 +1069,61 @@ async fn asking_for_an_export_or_a_backup_again_returns_the_one_under_way() {
     assert_eq!(n, 1);
     f.s.stop().await;
 }
+
+#[tokio::test]
+async fn no_audio_is_made_for_a_book_scheduled_for_deletion() {
+    let f = Fx::new().await;
+    let dp = format!("/api/books/{}/deletion", f.book);
+    f.s.post(DEL, &dp, json!({}), 202).await;
+    let e =
+        f.s.post(
+            "/api/audiobooks/{audiobook_id}/make-ready",
+            &format!("/api/audiobooks/{}/make-ready", f.audiobook),
+            json!({ "scope": { "kind": "whole_book" } }),
+            409,
+        )
+        .await;
+    assert_eq!(e["code"], "deletion_pending", "{e}");
+    let e =
+        f.s.call(
+            Method::POST,
+            "/api/audiobooks/{audiobook_id}/chapters/{chapter_id}/request",
+            &format!(
+                "/api/audiobooks/{}/chapters/{}/request",
+                f.audiobook, f.chapters[0]
+            ),
+            Some(DEVICE),
+            Some(json!({ "ahead": 0 })),
+            409,
+        )
+        .await;
+    assert_eq!(e["code"], "deletion_pending", "{e}");
+    // after the undo it works again
+    f.s.delete(DEL, &dp, 204).await;
+    f.make_all().await;
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn audio_folders_that_belong_to_no_audiobook_are_swept_and_real_ones_kept() {
+    let f = Fx::new().await;
+    f.make_all().await;
+    let real = f.s.dir.path().join("audio").join(&f.audiobook);
+    let orphan = f.s.dir.path().join("audio").join("01ORPHANAUDIOBOOK");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("01CHAPTER.part"), b"left behind").unwrap();
+    let before = std::fs::read_dir(&real).unwrap().count();
+    assert!(before > 0);
+    let dir = f.s.stop().await;
+    // a restart sweeps
+    let s = TestServer::start_in(dir).await;
+    for _ in 0..100 {
+        if !orphan.exists() {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+    }
+    assert!(!orphan.exists(), "the orphan folder is still there");
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), before);
+    s.stop().await;
+}

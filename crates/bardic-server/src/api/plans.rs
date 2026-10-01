@@ -535,14 +535,7 @@ async fn change(
                         return Err(ApiError::conflict(code, "Only a paused plan, or one that needs you, can be resumed."));
                     }
                     let t = target(&tx, &audiobook)?;
-                    let deleting: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM deletions WHERE book_id=?1 AND state='pending')",
-                        [&t.book_id],
-                        |r| r.get(0),
-                    )?;
-                    if deleting {
-                        return Err(ApiError::conflict("deletion_pending", "This book is scheduled for deletion. Cancel the deletion before making more audio."));
-                    }
+                    super::audio::require_not_deleting(&tx, &t.book_id)?;
                     if t.source_state == "key_rejected" {
                         return Err(ApiError::conflict("key_rejected", "The API key was rejected. Set a working key first."));
                     }

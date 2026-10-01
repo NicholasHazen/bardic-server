@@ -2,6 +2,9 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.3.2 (M6: deletion and audio; behaviour only)
+- `requestChapterAudio`, `makeAudiobookReady`, `resumeJob` and `resumePlan` answer 409 `deletion_pending` while the book is scheduled for deletion. A deletion that comes due stops any job still open for the book, and audio folders that belong to no audiobook are swept at startup and shortly after a deletion.
+
 ## 0.3.1 (M6: limits on work a client can start; backups; additive)
 - `Backup.path` is now relative to the data folder (`backups/<id>`) instead of absolute, and the backup's database copy has the API keys removed.
 - `streamEvents` documents `429 too_many_streams` (at most 64 open streams).
