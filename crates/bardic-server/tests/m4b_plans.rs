@@ -658,15 +658,25 @@ async fn a_premium_sample_is_a_counted_request_made_once_per_revision() {
             .to_string();
     let path = format!("/api/voices/{voice}/sample");
     let (h, a) =
-        f.s.raw("/api/voices/{voice_id}/sample", &path, &[], 200)
-            .await;
+        f.s.raw(
+            "/api/voices/{voice_id}/sample",
+            &path,
+            &[("x-bardic-device", DEVICE)],
+            200,
+        )
+        .await;
     assert_eq!(&a[..4], b"RIFF");
     assert_eq!(h["content-type"], "audio/wav");
     let spent = micros(&f.allowance().await["spent"]["known"]);
     assert!(spent > 0, "a premium sample is counted");
     assert_eq!(f.g.received(), 1);
-    f.s.raw("/api/voices/{voice_id}/sample", &path, &[], 200)
-        .await;
+    f.s.raw(
+        "/api/voices/{voice_id}/sample",
+        &path,
+        &[("x-bardic-device", DEVICE)],
+        200,
+    )
+    .await;
     assert_eq!(f.g.received(), 1, "the repeat is free");
     assert_eq!(micros(&f.allowance().await["spent"]["known"]), spent);
 
@@ -688,7 +698,7 @@ async fn a_premium_sample_is_a_counted_request_made_once_per_revision() {
         f.s.raw(
             "/api/voices/{voice_id}/sample",
             &format!("/api/voices/{other}/sample"),
-            &[],
+            &[("x-bardic-device", DEVICE)],
             409,
         )
         .await;

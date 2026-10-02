@@ -12,6 +12,7 @@ use crate::{
     error::ApiError,
     events::Notice,
     jobs,
+    maintenance::AudioScope,
 };
 use axum::{
     body::Bytes,
@@ -115,7 +116,7 @@ pub async fn create(
     let (i, j) = (id.clone(), job_id.clone());
     let (v, title, author, chapters) = match state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(audiobook.clone()), at.clone(), move |c| {
             let tx = c.transaction()?;
             let t = target(&tx, &audiobook)?;
             let (title, author): (String, String) = tx.query_row("SELECT title,author FROM books WHERE id=?1", [&t.book_id], |r| Ok((r.get(0)?, r.get(1)?)))?;

@@ -12,7 +12,9 @@ use crate::{
     app::{Actor, AppState, DeviceCtx, ListenerCtx},
     error::ApiError,
     events::Notice,
-    jobs, plans, spend,
+    jobs,
+    maintenance::AudioScope,
+    plans, spend,
 };
 use axum::{
     extract::{Path, State},
@@ -201,7 +203,7 @@ pub async fn preview(
     let (id, now) = (state.new_id(), state.clock.now());
     let v = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(audiobook.clone()), state.now(), move |c| {
             let tx = c.transaction()?;
             let t = premium_target(&tx, &audiobook)?;
             let q = quote(&tx, &audiobook, &t.book_id, &input.scope, now)?;
@@ -267,7 +269,7 @@ pub async fn create(
     let actor = Actor::with_listener(&device, &listener);
     let out = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Estimate(input.estimate_id.clone()), state.now(), move |c| {
             let tx = c.transaction()?;
             if let Some(k) = &key {
                 let existing: Option<String> = tx.query_row("SELECT id FROM plans WHERE idempotency_key=?1", [k], |r| r.get(0)).optional()?;

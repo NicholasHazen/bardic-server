@@ -116,7 +116,8 @@ curl -s $B/api/audiobooks/$AB/chapters               # ready / making / not_yet 
 # The audio supports Range; timings drive read-along
 curl -s -H "Range: bytes=0-99" $B/api/audio/<audio id> -o /dev/null -D -
 curl -s $B/api/audio/<audio id>/timings
-curl -s $B/api/voices/<voice id>/sample -o sample.wav
+# Samples without browser provenance need the device header (premium samples can spend).
+curl -s -H "$D" $B/api/voices/<voice id>/sample -o sample.wav
 ```
 
 ## Premium audio: plans and the Allowance (M4)

@@ -5,6 +5,7 @@ use crate::{
     app::{Actor, AppState, DeviceCtx, ListenerCtx},
     error::ApiError,
     jobs,
+    maintenance::AudioScope,
     voices::breeze::{self, SpeakError},
 };
 use axum::{
@@ -174,7 +175,7 @@ pub async fn request_chapter(
     );
     let out = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::BookOfAudiobook(audiobook.clone()), at.clone(), move |c| {
             let tx = c.transaction()?;
             let t = target(&tx, &audiobook)?;
             let idx = chapter_index(&tx, &t.book_id, &chapter)?;
@@ -222,7 +223,7 @@ pub async fn request_chapter(
                     let front: i64 = tx.query_row("SELECT COALESCE(MIN(position),1)-1 FROM job_items WHERE job_id=?1", [&j], |r| r.get(0))?;
                     tx.execute(
                         "INSERT INTO job_items(job_id,chapter_id,position,state) VALUES(?1,?2,?3,'queued')
-                         ON CONFLICT(job_id,chapter_id) DO UPDATE SET position=?3, state='queued', detail=NULL WHERE state<>'done'",
+                         ON CONFLICT(job_id,chapter_id) DO UPDATE SET position=?3, state='queued', detail=NULL",
                         params![j, chapter, front],
                     )?;
                     tx.execute("UPDATE jobs SET urgent=1 WHERE id=?1", [&j])?;
@@ -342,52 +343,56 @@ pub async fn make_ready(
     );
     let v = state
         .store
-        .run(move |c| {
-            let tx = c.transaction()?;
-            let t = target(&tx, &audiobook)?;
-            if let Some(k) = &key {
-                let existing: Option<String> = tx
-                    .query_row("SELECT id FROM jobs WHERE idempotency_key=?1", [k], |r| {
-                        r.get(0)
-                    })
-                    .optional()?;
-                if let Some(j) = existing {
-                    return Ok((jobs::job_value(&tx, &j)?, false));
+        .run_audio(
+            AudioScope::Audiobook(audiobook.clone()),
+            at.clone(),
+            move |c| {
+                let tx = c.transaction()?;
+                let t = target(&tx, &audiobook)?;
+                if let Some(k) = &key {
+                    let existing: Option<String> = tx
+                        .query_row("SELECT id FROM jobs WHERE idempotency_key=?1", [k], |r| {
+                            r.get(0)
+                        })
+                        .optional()?;
+                    if let Some(j) = existing {
+                        return Ok((jobs::job_value(&tx, &j)?, false));
+                    }
                 }
-            }
-            let chosen = resolve_scope(&tx, &t.book_id, &input.scope)?;
-            require_not_deleting(&tx, &t.book_id)?;
-            require_ready_to_make(&t)?;
-            let mut missing = vec![];
-            for ch in chosen {
-                if !has_audio(&tx, &audiobook, &ch)? {
-                    missing.push(ch);
+                let chosen = resolve_scope(&tx, &t.book_id, &input.scope)?;
+                require_not_deleting(&tx, &t.book_id)?;
+                require_ready_to_make(&t)?;
+                let mut missing = vec![];
+                for ch in chosen {
+                    if !has_audio(&tx, &audiobook, &ch)? {
+                        missing.push(ch);
+                    }
                 }
-            }
-            let (job_id, created) = match running_job(&tx, &audiobook)? {
-                Some(j) => (j, false),
-                None => {
-                    new_job(
-                        &tx,
-                        NewJob {
-                            id: &new_id,
-                            audiobook: &audiobook,
-                            book: &t.book_id,
-                            urgent: false,
-                            actor: &actor,
-                            key: key.as_deref(),
-                            at: &at,
-                        },
-                    )?;
-                    (new_id, true)
-                }
-            };
-            jobs::add_items(&tx, &job_id, &missing)?;
-            jobs::recount(&tx, &job_id, &at)?;
-            let v = jobs::job_value(&tx, &job_id)?;
-            tx.commit()?;
-            Ok((v, created || !missing.is_empty()))
-        })
+                let (job_id, created) = match running_job(&tx, &audiobook)? {
+                    Some(j) => (j, false),
+                    None => {
+                        new_job(
+                            &tx,
+                            NewJob {
+                                id: &new_id,
+                                audiobook: &audiobook,
+                                book: &t.book_id,
+                                urgent: false,
+                                actor: &actor,
+                                key: key.as_deref(),
+                                at: &at,
+                            },
+                        )?;
+                        (new_id, true)
+                    }
+                };
+                jobs::add_items(&tx, &job_id, &missing)?;
+                jobs::recount(&tx, &job_id, &at)?;
+                let v = jobs::job_value(&tx, &job_id)?;
+                tx.commit()?;
+                Ok((v, created || !missing.is_empty()))
+            },
+        )
         .await?;
     if v.1 {
         jobs::announce(&state, v.0["id"].as_str().unwrap_or_default());
@@ -654,7 +659,7 @@ pub async fn get_audio(
     let key = id.clone();
     let row: Option<(String, String)> = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audio(id.clone()), state.now(), move |c| {
             Ok(c.query_row(
                 "SELECT path,content_type FROM audio WHERE id=?1 AND deleted_at IS NULL",
                 [&key],
@@ -665,7 +670,20 @@ pub async fn get_audio(
         .await?;
     let (path, ct) = row.ok_or_else(audio_not_found)?;
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-    file_response_pub(state.store.data_dir().join(path), &ct, &id, range, true).await
+    let response =
+        file_response_pub(state.store.data_dir().join(path), &ct, &id, range, true).await;
+    if response
+        .as_ref()
+        .is_err_and(|e| e.code == "audio_not_found")
+    {
+        // A file can disappear after the metadata check but before it is opened. Recheck
+        // this exact immutable id; never invalidate a newly generated replacement.
+        state
+            .store
+            .run_audio(AudioScope::Audio(id), state.now(), |_| Ok(()))
+            .await?;
+    }
+    response
 }
 
 /// `getAudioTimings`
@@ -676,7 +694,7 @@ pub async fn get_timings(
     let key = id.clone();
     let t: Option<String> = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audio(id.clone()), state.now(), move |c| {
             Ok(c.query_row(
                 "SELECT timings FROM audio WHERE id=?1 AND deleted_at IS NULL",
                 [&key],
@@ -700,161 +718,249 @@ pub async fn get_timings(
 const SAMPLE_TEXT: &str =
     "The lantern swung low, and the road ahead began to show itself, one patient step at a time.";
 
-/// `getVoiceSample`: free voices only for now; a cached repeat costs nothing.
-pub async fn voice_sample(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(voice_id): Path<String>,
-) -> Result<Response, ApiError> {
-    type VoiceRow = (String, String, String, String, bool, String, String);
-    let v = voice_id.clone();
-    let row: Option<VoiceRow> = state
-        .store
-        .run(move |c| {
-            Ok(c.query_row(
-                "SELECT v.external_id,v.revision,v.tier,s.state,v.available,s.config,s.id FROM voices v JOIN voice_sources s ON s.id=v.source_id WHERE v.id=?1",
-                [&v],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0, r.get(5)?, r.get(6)?)),
-            )
-            .optional()?)
-        })
-        .await?;
-    let (external, revision, tier, source_state, available, config, source) =
-        row.ok_or_else(|| ApiError::not_found("voice_not_found", "No voice has this id."))?;
-    let range = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let (vid, rev) = (voice_id.clone(), revision.clone());
-    let cached: Option<String> = state
-        .store
-        .run(move |c| {
-            Ok(c.query_row(
-                "SELECT path FROM voice_samples WHERE voice_id=?1 AND revision=?2",
-                [&vid, &rev],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })
-        .await?;
-    if let Some(p) = cached {
-        if let Ok(resp) = file_response_pub(
-            state.store.data_dir().join(p),
-            "audio/wav",
-            &format!("{voice_id}-{revision}"),
-            range.as_deref(),
-            false,
-        )
-        .await
-        {
-            return Ok(resp);
-        }
-    }
-    if source_state == "not_set_up" {
+#[derive(Clone, PartialEq)]
+struct SampleVoice {
+    external: String,
+    revision: String,
+    tier: String,
+    source_state: String,
+    available: bool,
+    config: String,
+    source: String,
+}
+
+fn sample_voice(c: &Connection, voice_id: &str) -> Result<SampleVoice, ApiError> {
+    c.query_row(
+        "SELECT v.external_id,v.revision,v.tier,s.state,v.available,s.config,s.id FROM voices v JOIN voice_sources s ON s.id=v.source_id WHERE v.id=?1",
+        [voice_id], |r| Ok(SampleVoice { external: r.get(0)?, revision: r.get(1)?, tier: r.get(2)?, source_state: r.get(3)?, available: r.get::<_,i64>(4)? != 0, config: r.get(5)?, source: r.get(6)? }),
+    ).optional()?.ok_or_else(|| ApiError::not_found("voice_not_found", "No voice has this id."))
+}
+
+async fn load_sample_voice(state: &AppState, voice_id: &str) -> Result<SampleVoice, ApiError> {
+    let vid = voice_id.to_string();
+    state.store.run(move |c| sample_voice(c, &vid)).await
+}
+
+fn sample_source_ready(voice: &SampleVoice) -> Result<(), ApiError> {
+    if voice.source_state == "not_set_up" {
         return Err(ApiError::conflict(
             "source_not_set_up",
-            format!("The {source} source is not set up."),
+            format!("The {} source is not set up.", voice.source),
         ));
     }
-    if source_state == "key_rejected" {
+    if voice.source_state == "key_rejected" {
         return Err(ApiError::conflict(
             "key_rejected",
             "The API key was rejected.",
         ));
     }
-    if tier == "premium" && available {
-        return premium_sample(
-            &state,
-            &voice_id,
-            &external,
-            &revision,
-            &config,
-            range.as_deref(),
-        )
-        .await;
-    }
-    if !available || source_state != "connected" {
+    if !voice.available || voice.source_state != "connected" {
         return Err(ApiError::conflict(
             "source_unreachable",
             "The voice server could not be reached.",
         ));
     }
-    let cfg: Value = serde_json::from_str(&config).unwrap_or(Value::Null);
-    let base = cfg["base_url"].as_str().unwrap_or_default().to_string();
-    let key = cfg["api_key"].as_str().map(str::to_string);
-    let speak = async {
-        let (live, seed) = breeze::live_voice(&base, key.as_deref(), &external).await?;
-        if live != revision {
-            return Err(SpeakError::VoiceChanged);
-        }
-        breeze::speak(&base, key.as_deref(), &external, seed, SAMPLE_TEXT).await
-    };
-    let speech = speak.await.map_err(|e| match e {
-        SpeakError::Unreachable => ApiError::conflict(
-            "source_unreachable",
-            "The voice server could not be reached.",
-        ),
-        SpeakError::KeyRejected => {
-            ApiError::conflict("key_rejected", "The voice server rejected the API key.")
-        }
-        SpeakError::VoiceGone => ApiError::conflict(
-            "voice_unavailable",
-            "The voice is no longer on the voice server.",
-        ),
-        SpeakError::VoiceChanged => ApiError::conflict(
+    Ok(())
+}
+
+fn check_sample_snapshot(expected: &SampleVoice, current: &SampleVoice) -> Result<(), ApiError> {
+    sample_source_ready(current)?;
+    if current != expected {
+        return Err(ApiError::conflict(
             "voice_changed",
-            "The voice changed on the server. Refresh the source and choose it again.",
-        ),
-        SpeakError::Busy(s) => {
-            let mut e = ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limited",
-                "The voice server is busy. Try again shortly.",
-            );
-            e.retryable = Some(true);
-            e.retry_after_seconds = Some(s as u32);
-            e
-        }
-        SpeakError::Refused(code) => ApiError::conflict(
-            "provider_refused",
-            format!("The voice server refused the sample ({code})."),
-        ),
-        SpeakError::Failed(m) => ApiError::conflict("provider_refused", m),
-    })?;
-    let rel = format!("samples/{voice_id}/{revision}.wav");
-    let full = state.store.data_dir().join(&rel);
-    let mut wav = crate::audio::wav_header(speech.pcm.len() as u32).to_vec();
-    wav.extend_from_slice(&speech.pcm);
-    if let Some(dir) = full.parent() {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(ApiError::internal)?;
+            "The voice or its source changed. Refresh the source and try the sample again.",
+        ));
     }
-    tokio::fs::write(&full, &wav)
-        .await
-        .map_err(ApiError::internal)?;
-    let (vid, rev, p, at, n) = (
-        voice_id.clone(),
-        revision.clone(),
-        rel,
-        state.now(),
-        wav.len() as i64,
-    );
-    state
+    Ok(())
+}
+
+async fn cached_sample(
+    state: &AppState,
+    voice_id: &str,
+    revision: &str,
+) -> Result<Option<std::path::PathBuf>, ApiError> {
+    let (vid, rev) = (voice_id.to_string(), revision.to_string());
+    let cached: Option<(String, i64)> = state
         .store
         .run(move |c| {
-            c.execute("INSERT OR REPLACE INTO voice_samples(voice_id,revision,path,bytes,content_type,created_at) VALUES(?1,?2,?3,?4,'audio/wav',?5)", params![vid, rev, p, n, at])?;
-            Ok(())
+            Ok(c.query_row(
+                "SELECT path,bytes FROM voice_samples WHERE voice_id=?1 AND revision=?2",
+                [&vid, &rev],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
         })
         .await?;
+    let Some((path, bytes)) = cached else {
+        return Ok(None);
+    };
+    let path = state.store.data_dir().join(path);
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.is_file() && meta.len() == bytes as u64 && bytes >= 44 => Ok(Some(path)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ApiError::internal(e)),
+    }
+}
+
+/// `getVoiceSample`: one shared request per voice revision; every cached repeat costs nothing.
+pub async fn voice_sample(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(voice_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let voice = load_sample_voice(&state, &voice_id).await?;
+    let revision = voice.revision.clone();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let path = match cached_sample(&state, &voice_id, &revision).await? {
+        Some(path) => path,
+        None => {
+            let (worker, vid, rev) = (state.clone(), voice_id.clone(), revision.clone());
+            state
+                .samples
+                .run(voice_id.clone(), revision.clone(), move || {
+                    make_sample(worker, vid, rev)
+                })
+                .await?
+        }
+    };
     file_response_pub(
-        full,
+        path,
         "audio/wav",
         &format!("{voice_id}-{revision}"),
         range.as_deref(),
         false,
     )
     .await
+}
+
+async fn make_sample(
+    state: AppState,
+    voice_id: String,
+    revision: String,
+) -> Result<std::path::PathBuf, ApiError> {
+    let voice = load_sample_voice(&state, &voice_id).await?;
+    if voice.revision != revision {
+        return Err(ApiError::conflict(
+            "voice_changed",
+            "The voice changed. Refresh the source and try the sample again.",
+        ));
+    }
+    // A caller can have read a miss before a previous flight finished. Recheck inside the gate before spending.
+    if let Some(path) = cached_sample(&state, &voice_id, &revision).await? {
+        return Ok(path);
+    }
+    sample_source_ready(&voice)?;
+    if voice.tier == "premium" {
+        return premium_sample(
+            &state,
+            &voice_id,
+            &voice.external,
+            &revision,
+            &voice.config,
+            &voice,
+        )
+        .await;
+    }
+    let cfg: Value = serde_json::from_str(&voice.config).unwrap_or(Value::Null);
+    let base = cfg["base_url"].as_str().unwrap_or_default().to_string();
+    let key = cfg["api_key"].as_str().map(str::to_string);
+    let speak = async {
+        let (live, seed) = breeze::live_voice(&base, key.as_deref(), &voice.external).await?;
+        if live != voice.revision {
+            return Err(SpeakError::VoiceChanged);
+        }
+        let current = load_sample_voice(&state, &voice_id)
+            .await
+            .map_err(|_| SpeakError::VoiceChanged)?;
+        check_sample_snapshot(&voice, &current).map_err(|_| SpeakError::VoiceChanged)?;
+        breeze::speak(&base, key.as_deref(), &voice.external, seed, SAMPLE_TEXT).await
+    };
+    let speech = crate::samples::bounded_free_sample(std::time::Duration::from_secs(120), speak)
+        .await?
+        .map_err(|e| match e {
+            SpeakError::Unreachable => ApiError::conflict(
+                "source_unreachable",
+                "The voice server could not be reached.",
+            ),
+            SpeakError::KeyRejected => {
+                ApiError::conflict("key_rejected", "The voice server rejected the API key.")
+            }
+            SpeakError::VoiceGone => ApiError::conflict(
+                "voice_unavailable",
+                "The voice is no longer on the voice server.",
+            ),
+            SpeakError::VoiceChanged => ApiError::conflict(
+                "voice_changed",
+                "The voice changed on the server. Refresh the source and choose it again.",
+            ),
+            SpeakError::Busy(s) => {
+                let mut e = ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    "The voice server is busy. Try again shortly.",
+                );
+                e.retryable = Some(true);
+                e.retry_after_seconds = Some(s as u32);
+                e
+            }
+            SpeakError::Refused(code) => ApiError::conflict(
+                "provider_refused",
+                format!("The voice server refused the sample ({code})."),
+            ),
+            SpeakError::Failed(m) => ApiError::conflict("provider_refused", m),
+        })?;
+    publish_sample(&state, &voice_id, &revision, speech.pcm).await
+}
+
+/// Publish complete bytes before the cache row, so no waiter can observe a partial file.
+async fn publish_sample(
+    state: &AppState,
+    voice_id: &str,
+    revision: &str,
+    pcm: Vec<u8>,
+) -> Result<std::path::PathBuf, ApiError> {
+    use tokio::io::AsyncWriteExt;
+    let rel = format!("samples/{voice_id}/{revision}.wav");
+    let full = state.store.data_dir().join(&rel);
+    let dir = full
+        .parent()
+        .ok_or_else(|| ApiError::internal("sample path has no parent"))?;
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(ApiError::internal)?;
+    let part = full.with_extension(format!("{}.part", state.new_id()));
+    let mut wav = crate::audio::wav_header(pcm.len() as u32).to_vec();
+    wav.extend_from_slice(&pcm);
+    let result = async {
+        let mut file = tokio::fs::File::create(&part).await.map_err(ApiError::internal)?;
+        file.write_all(&wav).await.map_err(ApiError::internal)?;
+        file.sync_all().await.map_err(ApiError::internal)?;
+        drop(file);
+        tokio::fs::rename(&part, &full).await.map_err(ApiError::internal)?;
+        #[cfg(unix)]
+        {
+            let dirs = dir.ancestors().take_while(|p| p.starts_with(state.store.data_dir()))
+                .map(std::path::Path::to_path_buf).collect::<Vec<_>>();
+            tokio::task::spawn_blocking(move || {
+                for dir in dirs { std::fs::File::open(dir)?.sync_all()?; }
+                Ok::<_, std::io::Error>(())
+            }).await.map_err(ApiError::internal)?.map_err(ApiError::internal)?;
+        }
+        let (vid, rev, p, at, n) = (voice_id.to_string(), revision.to_string(), rel, state.now(), wav.len() as i64);
+        state.store.run(move |c| {
+            c.execute("INSERT OR REPLACE INTO voice_samples(voice_id,revision,path,bytes,content_type,created_at) VALUES(?1,?2,?3,?4,'audio/wav',?5)", params![vid,rev,p,n,at])?;
+            Ok(())
+        }).await?;
+        Ok(full.clone())
+    }.await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    result
 }
 
 /// A premium sample is a short real request: reserved against this month's Allowance, settled from
@@ -865,16 +971,19 @@ async fn premium_sample(
     external: &str,
     revision: &str,
     config: &str,
-    range: Option<&str>,
-) -> Result<Response, ApiError> {
+    snapshot: &SampleVoice,
+) -> Result<std::path::PathBuf, ApiError> {
     use crate::{plans, spend, voices::gemini};
     let cfg: Value = serde_json::from_str(config).unwrap_or(Value::Null);
     let key = cfg["api_key"].as_str().unwrap_or_default().to_string();
     let (spend_id, vid, now) = (state.new_id(), voice_id.to_string(), state.clock.now());
     let sid = spend_id.clone();
+    let expected = snapshot.clone();
     let denied = state
         .store
         .run(move |c| {
+            let current = sample_voice(c, &vid)?;
+            check_sample_snapshot(&expected, &current)?;
             let (price, as_of): (i64, String) = c.query_row(
                 "SELECT per_unit,as_of FROM prices WHERE provider='gemini'",
                 [],
@@ -904,129 +1013,112 @@ async fn premium_sample(
             "This month's Allowance is used up, so a premium sample cannot be made.",
         ));
     }
-    let result = gemini::speak(&state.config.gemini_url, &key, external, SAMPLE_TEXT).await;
-    let (outcome, speech) = match result {
-        Ok(s) => (
-            match s.usage.cost_micros(state.clock.now()) {
-                Some(m) => spend::Outcome::Known {
-                    micros: m,
-                    input: s.usage.input_tokens,
-                    output: s.usage.output_tokens,
-                },
-                None => spend::Outcome::Unknown {
-                    note: format!("Gemini did not report complete usage ({}).", s.usage.detail)
-                        .into(),
-                },
-            },
-            Ok(s),
-        ),
-        Err(e) => match e {
-            gemini::SpeakError::NoAudio(u) => (
-                match u.cost_micros(state.clock.now()) {
+    use futures_util::FutureExt;
+    let attempt = std::panic::AssertUnwindSafe(async {
+        let result = gemini::speak(&state.config.gemini_url, &key, external, SAMPLE_TEXT).await;
+        let (outcome, speech) = match result {
+            Ok(s) => (
+                match s.usage.cost_micros(state.clock.now()) {
                     Some(m) => spend::Outcome::Known {
                         micros: m,
-                        input: u.input_tokens,
-                        output: u.output_tokens,
+                        input: s.usage.input_tokens,
+                        output: s.usage.output_tokens,
                     },
                     None => spend::Outcome::Unknown {
-                        note: format!(
-                            "Gemini answered without audio and without complete usage ({}).",
-                            u.detail
-                        )
-                        .into(),
+                        note: format!("Gemini did not report complete usage ({}).", s.usage.detail)
+                            .into(),
                     },
                 },
-                Err(ApiError::conflict(
-                    "provider_refused",
-                    "Gemini answered without audio. The request is counted as spent.",
-                )),
+                Ok(s),
             ),
-            gemini::SpeakError::Uncertain => (
-                spend::Outcome::Unknown {
-                    note: "The request may have been processed.".into(),
-                },
-                Err(ApiError::conflict(
-                    "provider_uncertain",
-                    "The request may have been processed; its cost is counted as unknown.",
-                )),
-            ),
-            gemini::SpeakError::Failed(m) => (
-                spend::Outcome::Unknown {
-                    note: "The response could not be used; the request was billed.".into(),
-                },
-                Err(ApiError::conflict("provider_refused", m)),
-            ),
-            gemini::SpeakError::KeyRejected => (
-                spend::Outcome::Nothing,
-                Err(ApiError::conflict(
-                    "key_rejected",
-                    "Gemini rejected the API key.",
-                )),
-            ),
-            gemini::SpeakError::Unreachable => (
-                spend::Outcome::Nothing,
-                Err(ApiError::conflict(
-                    "source_unreachable",
-                    "Gemini could not be reached.",
-                )),
-            ),
-            gemini::SpeakError::Refused(c) => (
-                spend::Outcome::Nothing,
-                Err(ApiError::conflict(
-                    "provider_refused",
-                    format!("Gemini refused the sample ({c})"),
-                )),
-            ),
-            gemini::SpeakError::Quota { retry_after, .. } => {
-                let mut e = ApiError::new(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "provider_quota",
-                    "Gemini's quota or rate limit was reached. Try again later.",
-                );
-                e.retryable = Some(true);
-                e.retry_after_seconds = Some(retry_after.min(u32::MAX as u64) as u32);
-                (spend::Outcome::Nothing, Err(e))
-            }
-        },
-    };
-    let sid = spend_id.clone();
-    state
-        .store
-        .run(move |c| spend::settle(c, &sid, &outcome))
-        .await?;
-    let speech = speech?;
-    let rel = format!("samples/{voice_id}/{revision}.wav");
-    let full = state.store.data_dir().join(&rel);
-    let mut wav = crate::audio::wav_header(speech.pcm.len() as u32).to_vec();
-    wav.extend_from_slice(&speech.pcm);
-    if let Some(dir) = full.parent() {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(ApiError::internal)?;
+            Err(e) => match e {
+                gemini::SpeakError::NoAudio(u) => (
+                    match u.cost_micros(state.clock.now()) {
+                        Some(m) => spend::Outcome::Known {
+                            micros: m,
+                            input: u.input_tokens,
+                            output: u.output_tokens,
+                        },
+                        None => spend::Outcome::Unknown {
+                            note: format!(
+                                "Gemini answered without audio and without complete usage ({}).",
+                                u.detail
+                            )
+                            .into(),
+                        },
+                    },
+                    Err(ApiError::conflict(
+                        "provider_refused",
+                        "Gemini answered without audio. The request is counted as spent.",
+                    )),
+                ),
+                gemini::SpeakError::Uncertain => (
+                    spend::Outcome::Unknown {
+                        note: "The request may have been processed.".into(),
+                    },
+                    Err(ApiError::conflict(
+                        "provider_uncertain",
+                        "The request may have been processed; its cost is counted as unknown.",
+                    )),
+                ),
+                gemini::SpeakError::Failed(m) => (
+                    spend::Outcome::Unknown {
+                        note: "The response could not be used; the request was billed.".into(),
+                    },
+                    Err(ApiError::conflict("provider_refused", m)),
+                ),
+                gemini::SpeakError::KeyRejected => (
+                    spend::Outcome::Nothing,
+                    Err(ApiError::conflict(
+                        "key_rejected",
+                        "Gemini rejected the API key.",
+                    )),
+                ),
+                gemini::SpeakError::Unreachable => (
+                    spend::Outcome::Nothing,
+                    Err(ApiError::conflict(
+                        "source_unreachable",
+                        "Gemini could not be reached.",
+                    )),
+                ),
+                gemini::SpeakError::Refused(c) => (
+                    spend::Outcome::Nothing,
+                    Err(ApiError::conflict(
+                        "provider_refused",
+                        format!("Gemini refused the sample ({c})"),
+                    )),
+                ),
+                gemini::SpeakError::Quota { retry_after, .. } => {
+                    let mut e = ApiError::new(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "provider_quota",
+                        "Gemini's quota or rate limit was reached. Try again later.",
+                    );
+                    e.retryable = Some(true);
+                    e.retry_after_seconds = Some(retry_after.min(u32::MAX as u64) as u32);
+                    (spend::Outcome::Nothing, Err(e))
+                }
+            },
+        };
+        let sid = spend_id.clone();
+        state
+            .store
+            .run(move |c| spend::settle(c, &sid, &outcome))
+            .await?;
+        let speech = speech?;
+        publish_sample(state, voice_id, revision, speech.pcm).await
+    })
+    .catch_unwind()
+    .await;
+    match attempt {
+        Ok(result) => result,
+        Err(_) => {
+            // A panic may follow dispatch. Preserve a known settlement; an unsettled reservation is unknown.
+            state.store.run(move |c| {
+                c.execute("UPDATE spend SET status='unknown',note='The sample worker stopped while the request was in flight.' WHERE id=?1 AND status='reserved'", [&spend_id])?;
+                Ok(())
+            }).await?;
+            Err(ApiError::internal("premium sample worker panicked"))
+        }
     }
-    tokio::fs::write(&full, &wav)
-        .await
-        .map_err(ApiError::internal)?;
-    let (vid, rev, p, at, n) = (
-        voice_id.to_string(),
-        revision.to_string(),
-        rel,
-        state.now(),
-        wav.len() as i64,
-    );
-    state
-        .store
-        .run(move |c| {
-            c.execute("INSERT OR REPLACE INTO voice_samples(voice_id,revision,path,bytes,content_type,created_at) VALUES(?1,?2,?3,?4,'audio/wav',?5)", params![vid, rev, p, n, at])?;
-            Ok(())
-        })
-        .await?;
-    file_response_pub(
-        full,
-        "audio/wav",
-        &format!("{voice_id}-{revision}"),
-        range,
-        false,
-    )
-    .await
 }

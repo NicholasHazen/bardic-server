@@ -655,8 +655,13 @@ async fn a_voice_sample_is_made_once_per_revision() {
     let v = f.s.get("/api/voices", "/api/voices", 200).await["items"][0].clone();
     let path = format!("/api/voices/{}/sample", v["id"].as_str().unwrap());
     let (h, a) =
-        f.s.raw("/api/voices/{voice_id}/sample", &path, &[], 200)
-            .await;
+        f.s.raw(
+            "/api/voices/{voice_id}/sample",
+            &path,
+            &[("x-bardic-device", DEVICE)],
+            200,
+        )
+        .await;
     assert_eq!(&a[..4], b"RIFF");
     assert_eq!(h["content-type"], "audio/wav");
     let n = f.b.spoken().len();
@@ -665,7 +670,7 @@ async fn a_voice_sample_is_made_once_per_revision() {
         f.s.raw(
             "/api/voices/{voice_id}/sample",
             &path,
-            &[("range", "bytes=0-3")],
+            &[("range", "bytes=0-3"), ("x-bardic-device", DEVICE)],
             206,
         )
         .await;
@@ -674,7 +679,7 @@ async fn a_voice_sample_is_made_once_per_revision() {
     f.s.raw(
         "/api/voices/{voice_id}/sample",
         "/api/voices/nope/sample",
-        &[],
+        &[("x-bardic-device", DEVICE)],
         404,
     )
     .await;

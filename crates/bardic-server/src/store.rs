@@ -70,6 +70,42 @@ impl Store {
         &self.data_dir
     }
 
+    /// Recover Ready-file availability before requests or the worker can observe it.
+    pub fn reconcile_audio_startup(&self, at: &str) -> Result<usize, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| std::io::Error::other("database lock poisoned"))?;
+        crate::maintenance::reconcile_audio(
+            &conn,
+            &self.data_dir,
+            &crate::maintenance::AudioScope::All,
+            at,
+        )
+    }
+
+    /// Check only relevant immutable files, then perform the short database operation under
+    /// the same connection lock. The invalidation commits before `f`, even if `f` returns a
+    /// conflict (a missing premium chapter must not stay Ready after plan_required).
+    pub async fn run_audio<T, F>(
+        &self,
+        scope: crate::maintenance::AudioScope,
+        at: String,
+        f: F,
+    ) -> Result<T, ApiError>
+    where
+        F: FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let data_dir = self.data_dir.clone();
+        self.run(move |c| {
+            crate::maintenance::reconcile_audio(c, &data_dir, &scope, &at)
+                .map_err(ApiError::internal)?;
+            f(c)
+        })
+        .await
+    }
+
     /// Run a short database job on the blocking pool.
     pub async fn run<T, F>(&self, f: F) -> Result<T, ApiError>
     where

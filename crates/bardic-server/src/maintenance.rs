@@ -2,7 +2,71 @@
 
 use crate::{app::AppState, error::ApiError, events::Notice};
 use rusqlite::{params, Connection};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Limit filesystem checks to the rows an operation is about to describe or reuse.
+/// Reconciliation changes availability only; it never queues generation or deletes a file.
+pub enum AudioScope {
+    All,
+    Audiobook(String),
+    Book(String),
+    BookOfAudiobook(String),
+    Audio(String),
+    Estimate(String),
+    Job(String),
+}
+
+/// Keep immutable audio facts for held downloads, but stop claiming that unavailable bytes
+/// are Ready. Called under Store's connection lock: generation publishes a row only after its
+/// unique file is complete, and free-up-space marks a row unavailable before removing its file.
+/// Other I/O errors fail the operation rather than treating a temporarily inaccessible disk as
+/// permission to regenerate (particularly important for paid audio).
+pub fn reconcile_audio(
+    conn: &Connection,
+    data_dir: &Path,
+    scope: &AudioScope,
+    at: &str,
+) -> Result<usize, crate::store::StoreError> {
+    let (filter, id) = match scope {
+        AudioScope::All => ("1", ""),
+        AudioScope::Audiobook(id) => ("audiobook_id=?1", id.as_str()),
+        AudioScope::Book(id) => ("audiobook_id IN (SELECT id FROM audiobooks WHERE book_id=?1)", id.as_str()),
+        AudioScope::BookOfAudiobook(id) => ("audiobook_id IN (SELECT id FROM audiobooks WHERE book_id=(SELECT book_id FROM audiobooks WHERE id=?1))", id.as_str()),
+        AudioScope::Audio(id) => ("id=?1", id.as_str()),
+        AudioScope::Estimate(id) => ("audiobook_id=(SELECT audiobook_id FROM estimates WHERE id=?1)", id.as_str()),
+        AudioScope::Job(id) => ("audiobook_id=(SELECT audiobook_id FROM jobs WHERE id=?1)", id.as_str()),
+    };
+    let sql = format!("SELECT id,path,bytes FROM audio WHERE deleted_at IS NULL AND {filter}");
+    let mut stmt = conn.prepare(&sql)?;
+    let map = |r: &rusqlite::Row<'_>| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    };
+    let rows: Vec<(String, String, i64)> = if matches!(scope, AudioScope::All) {
+        stmt.query_map([], map)?.collect::<Result<_, _>>()?
+    } else {
+        stmt.query_map([id], map)?.collect::<Result<_, _>>()?
+    };
+    drop(stmt);
+    let mut changed = 0;
+    for (id, path, bytes) in rows {
+        let unavailable = match std::fs::metadata(data_dir.join(&path)) {
+            Ok(m) => !m.is_file() || u64::try_from(bytes).ok() != Some(m.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => return Err(e.into()),
+        };
+        if unavailable {
+            changed += conn.execute(
+                "UPDATE audio SET deleted_at=?2 WHERE id=?1 AND deleted_at IS NULL",
+                params![id, at],
+            )?;
+        }
+    }
+    Ok(changed)
+}
 
 /// Books whose scheduled deletion time has passed.
 fn due(conn: &Connection, now: &str) -> Result<Vec<String>, ApiError> {

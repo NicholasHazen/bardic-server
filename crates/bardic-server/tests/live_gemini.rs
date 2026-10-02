@@ -77,7 +77,7 @@ async fn a_real_gemini_sample_and_a_tiny_plan_under_five_cents() {
         .raw(
             "/api/voices/{voice_id}/sample",
             &format!("/api/voices/{voice}/sample"),
-            &[],
+            &[("x-bardic-device", common::DEVICE)],
             200,
         )
         .await;

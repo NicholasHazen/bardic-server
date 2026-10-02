@@ -93,7 +93,8 @@ pub fn announce(state: &AppState, job_id: &str) {
     state.jobs.poke();
 }
 
-/// Queue chapters on a job after its current items. Already queued or finished ones are kept as they are.
+/// Queue chapters on a job after its current items. Explicit free requests can requeue a
+/// finished item whose audio is unavailable. Finished paid items require a new approved plan.
 /// Returns how many were added.
 pub fn add_items(conn: &Connection, job_id: &str, chapters: &[String]) -> Result<i64, ApiError> {
     let mut pos: i64 = conn.query_row(
@@ -105,7 +106,10 @@ pub fn add_items(conn: &Connection, job_id: &str, chapters: &[String]) -> Result
     for c in chapters {
         let n = conn.execute(
             "INSERT INTO job_items(job_id,chapter_id,position,state) VALUES(?1,?2,?3,'queued')
-             ON CONFLICT(job_id,chapter_id) DO UPDATE SET state='queued', detail=NULL, position=excluded.position WHERE state IN ('failed','skipped')",
+             ON CONFLICT(job_id,chapter_id) DO UPDATE SET state='queued', detail=NULL, position=excluded.position
+             WHERE state IN ('failed','skipped') OR (state='done'
+               AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=?1 AND j.plan_id IS NULL)
+               AND NOT EXISTS(SELECT 1 FROM audio x JOIN jobs j ON j.audiobook_id=x.audiobook_id WHERE j.id=?1 AND x.chapter_id=?2 AND x.deleted_at IS NULL))",
             params![job_id, c, pos + 1],
         )?;
         if n > 0 {
@@ -726,7 +730,7 @@ async fn make_chapter(
             );
         }
         file.write_all(&pcm).await.map_err(fail_io)?;
-        file.flush().await.map_err(fail_io)?;
+        file.sync_data().await.map_err(fail_io)?;
         parts.pcm_bytes += pcm.len();
         parts.chunks_done = i + 1;
         let (a, c, id, n, done, bytes, t) = (
@@ -757,7 +761,7 @@ async fn make_chapter(
     file.write_all(&audio::wav_header(parts.pcm_bytes as u32))
         .await
         .map_err(fail_io)?;
-    file.flush().await.map_err(fail_io)?;
+    file.sync_all().await.map_err(fail_io)?;
     file.seek(std::io::SeekFrom::Start(0))
         .await
         .map_err(fail_io)?;
@@ -774,6 +778,25 @@ async fn make_chapter(
     tokio::fs::rename(&tmp, state.store.data_dir().join(&rel))
         .await
         .map_err(fail_io)?;
+    // Persist the rename (and newly created audio directories) before publishing Ready.
+    // Directory syncing is supported by the Unix filesystems used by the server here.
+    #[cfg(unix)]
+    {
+        let dirs = [
+            dir,
+            state.store.data_dir().join("audio"),
+            state.store.data_dir().to_path_buf(),
+        ];
+        tokio::task::spawn_blocking(move || {
+            for dir in dirs {
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|e| fail_io(std::io::Error::other(e)))?
+        .map_err(fail_io)?;
+    }
     Ok(Made {
         audio_id: parts.audio_id,
         path: rel,
@@ -809,7 +832,15 @@ async fn needs_you(state: &AppState, job_id: &str, code: &str, text: &str) {
 
 async fn process(state: &AppState, job_id: &str, chapter_id: &str) -> Result<(), ApiError> {
     let (j, c, at) = (job_id.to_string(), chapter_id.to_string(), state.now());
-    let Some(ctx) = state.store.run(move |c2| load_ctx(c2, &j, &c, &at)).await? else {
+    let Some(ctx) = state
+        .store
+        .run_audio(
+            crate::maintenance::AudioScope::Job(j.clone()),
+            at.clone(),
+            move |c2| load_ctx(c2, &j, &c, &at),
+        )
+        .await?
+    else {
         return Ok(());
     };
     announce(state, job_id);
