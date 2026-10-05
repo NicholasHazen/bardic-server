@@ -111,9 +111,35 @@ const SKIPPED: &[&str] = &["script", "style", "head", "svg", "nav"];
 
 /// What a chapter's markup yields.
 pub struct Extracted {
-    /// First heading (h1 to h3), else the document title.
+    /// First useful heading (h1 to h3), else a useful document title.
     pub title: Option<String>,
     pub paragraphs: Vec<String>,
+}
+
+/// Conversion artifacts can be rendered as decorative headings or document
+/// titles. Only reject recognizable identifiers; short words and numerals
+/// remain valid names. This affects metadata, never canonical paragraphs.
+fn useful_fallback_title(title: &str) -> bool {
+    let bytes = title.as_bytes();
+    !(bytes.len() == 2 && bytes[0] == b'c' && bytes[1].is_ascii_uppercase())
+}
+
+fn useful_document_title(title: &str) -> bool {
+    if !useful_fallback_title(title) {
+        return false;
+    }
+    // A lower-case document identifier is a conversion fallback. Preserve
+    // headings and capitalized chapter/part numbers even without a space.
+    !["chapter", "section", "part", "text", "page", "index", "c"]
+        .iter()
+        .any(|prefix| {
+            title.strip_prefix(prefix).is_some_and(|rest| {
+                !rest.is_empty()
+                    && rest
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == '_' || c == '-')
+            })
+        })
 }
 
 /// A forgiving markup reader: tolerates malformed XHTML and HTML, drops scripts,
@@ -193,7 +219,7 @@ pub fn extract_markup(html: &str) -> Extracted {
                 in_title = !closing && !self_closing;
                 if closing && doc_title.is_none() {
                     let t = collapse(&title_buf);
-                    if !t.is_empty() {
+                    if !t.is_empty() && useful_document_title(&t) {
                         doc_title = Some(t);
                     }
                 }
@@ -216,7 +242,7 @@ pub fn extract_markup(html: &str) -> Extracted {
                     heading_buf.clear();
                 } else if in_heading.as_deref() == Some(name.as_str()) {
                     let t = collapse(&heading_buf);
-                    if heading_title.is_none() && !t.is_empty() {
+                    if heading_title.is_none() && !t.is_empty() && useful_fallback_title(&t) {
                         heading_title = Some(t);
                     }
                     in_heading = None;
@@ -488,6 +514,35 @@ mod tests {
         let e = extract_markup("<p>open <b>bold <i>never closed &unknown; & loose < less than");
         assert!(!e.paragraphs.is_empty());
         let _ = extract_markup("<<<>>>&;&#;&#xZZ;<!-- unterminated");
+    }
+
+    #[test]
+    fn decorative_and_identifier_titles_do_not_hide_useful_headings() {
+        let e = extract_markup("<html><head><title>chapter001</title></head><body><h1>cD</h1><h2>Dedication</h2><p>For the ferry crew.</p></body></html>");
+        assert_eq!(e.title.as_deref(), Some("Dedication"));
+        assert_eq!(e.paragraphs, ["cD", "Dedication", "For the ferry crew."]);
+        let e = extract_markup("<html><head><title>cD</title></head><body><p>Words remain unchanged.</p></body></html>");
+        assert_eq!(e.title, None);
+        for title in [
+            "It",
+            "Up",
+            "I",
+            "IV",
+            "Été",
+            "The River",
+            "pH",
+            "iOS",
+            "eV",
+            "Chapter5",
+            "Part-1",
+        ] {
+            assert_eq!(
+                extract_markup(&format!("<h1>{title}</h1>"))
+                    .title
+                    .as_deref(),
+                Some(title)
+            );
+        }
     }
 
     #[test]

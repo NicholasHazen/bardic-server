@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.5.1
+  version: 0.5.2
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -622,7 +622,7 @@ paths:
       description: |
         Repairs display metadata for an existing book without changing text,
         hashes, chapter or line ids, places, audio, jobs or approved plans.
-        Updates chapter titles, kinds and the book's story counts atomically,
+        Updates chapter titles, kinds, source pagination and the book's story counts atomically,
         only when every chapter's text and order match the saved original.
         No provider is contacted. Repeating it without metadata changes is a no-op.
         409 `chapter_structure_changed` when text or chapter boundaries differ,
@@ -2318,13 +2318,21 @@ components:
             - $ref: '#/components/schemas/Error'
     Chapter:
       type: object
-      required: [id, index, title, kind, word_count, text_sha256]
+      required: [id, index, title, kind, word_count, text_length, page_count, text_sha256]
       properties:
         id: {type: string}
         index: {type: integer, minimum: 0}
         title: {type: string}
         kind: {type: string, enum: [story, front_matter, back_matter]}
         word_count: {type: integer}
+        text_length:
+          type: integer
+          minimum: 0
+          description: Length of the immutable chapter text in Unicode code points, including paragraph separators. Divide a Place offset by this length for progress within this chapter.
+        page_count:
+          type: [integer, 'null']
+          minimum: 1
+          description: Number of source pages represented by a chapter whose source pagination starts at its beginning and has consecutive numbered page markers. Null when the source does not supply enough reliable pagination; never estimated from word count or screen size. Existing imports can acquire this metadata through refreshBookChapters.
         text_sha256: {type: string}
     Line:
       type: object

@@ -43,6 +43,7 @@ Contract 0.5.0 validates as OpenAPI 3.1. `cargo fmt --check`, `cargo clippy --al
 - Coverage is tracked in `tests/coverage.rs`: move operation ids into `IMPLEMENTED` as they land.
 
 ## Notes from M1
+- Contract 0.5.2 exposes canonical Unicode `Chapter.text_length` for chapter progress and nullable source `page_count`. Valid EPUB 3 page-list/pagebreak and EPUB 2 NCX pagination can supply counts; ambiguous or absent pagination stays unknown. Existing chapter metadata refresh can safely backfill it. Conversion-code title fallbacks no longer display `cD` where a useful heading or a chapter/matter fallback is available.
 - Contract 0.5.1 restores deterministic EPUB TOC/NCX chapter names and structural matter classification. Chapter metadata refresh safely repairs existing names/kinds; list visibility and free/premium audio scopes can independently exclude matter. Plain-text headings are retained in new imports. See `TEXT.md` for compatibility and source-unit limits.
 - Contract 0.2.0 grew two more fixes found by the harness: operations taking `X-Bardic-Listener` document `404 listener_not_found`, and `cancelImport` was changed in the server so an import reports `cancelled` only after it cleaned up (a race the test exposed).
 - `audiobook_count` is 0 until M3.

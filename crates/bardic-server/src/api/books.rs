@@ -155,8 +155,8 @@ pub fn store_parsed(
         }
         let chapter_id = state.new_id();
         tx.execute(
-            "INSERT INTO chapters(id,book_id,idx,title,kind,text,text_sha256,word_count,char_len) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![chapter_id, book_id, idx as i64, ch.title, ch.kind, ch.text, sha256_hex(ch.text.as_bytes()), words, ch.text.chars().count() as i64],
+            "INSERT INTO chapters(id,book_id,idx,title,kind,text,text_sha256,word_count,char_len,page_count) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![chapter_id, book_id, idx as i64, ch.title, ch.kind, ch.text, sha256_hex(ch.text.as_bytes()), words, ch.text.chars().count() as i64, ch.page_count],
         )?;
         for (li, (start, end)) in ch.lines.iter().enumerate() {
             tx.execute(
@@ -732,11 +732,12 @@ pub struct ChaptersQuery {
 
 fn chapter_values(conn: &Connection, id: &str, include_matter: bool) -> Result<Value, ApiError> {
     let items: Vec<Value> = conn
-        .prepare("SELECT id,idx,title,kind,word_count,text_sha256 FROM chapters WHERE book_id=?1 AND (?2 OR kind='story') ORDER BY idx")?
+        .prepare("SELECT id,idx,title,kind,word_count,text_sha256,char_len,page_count FROM chapters WHERE book_id=?1 AND (?2 OR kind='story') ORDER BY idx")?
         .query_map(params![id, include_matter], |r| {
             Ok(json!({
                 "id": r.get::<_, String>(0)?, "index": r.get::<_, i64>(1)?, "title": r.get::<_, String>(2)?,
                 "kind": r.get::<_, String>(3)?, "word_count": r.get::<_, i64>(4)?, "text_sha256": r.get::<_, String>(5)?,
+                "text_length": r.get::<_, i64>(6)?, "page_count": r.get::<_, Option<i64>>(7)?,
             }))
         })?
         .collect::<Result<_, _>>()?;
@@ -821,10 +822,10 @@ pub async fn refresh_chapters(
             // Ordered, byte-for-byte comparison of every chapter must finish
             // before any metadata is changed. Chapter and line identities are
             // never rebuilt, so existing audio, places and plans remain valid.
-            type StoredChapter = (String, String, String, String, i64);
+            type StoredChapter = (String, String, String, String, i64, Option<i64>);
             let stored: Vec<StoredChapter> = tx
-                .prepare("SELECT id,title,kind,text,word_count FROM chapters WHERE book_id=?1 ORDER BY idx")?
-                .query_map([&target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .prepare("SELECT id,title,kind,text,word_count,page_count FROM chapters WHERE book_id=?1 ORDER BY idx")?
+                .query_map([&target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
                 .collect::<Result<_, _>>()?;
             if stored.len() != parsed.chapters.len()
                 || stored.iter().zip(&parsed.chapters).any(|(old, new)| old.3 != new.text)
@@ -841,7 +842,7 @@ pub async fn refresh_chapters(
                     story_words += old.4;
                     story_chapters += 1;
                 }
-                changed |= old.1 != new.title || old.2 != new.kind;
+                changed |= old.1 != new.title || old.2 != new.kind || old.5 != new.page_count;
             }
             let counts: (i64, i64) = tx.query_row(
                 "SELECT word_count,story_chapter_count FROM books WHERE id=?1",
@@ -852,8 +853,8 @@ pub async fn refresh_chapters(
             if changed {
                 for (old, new) in stored.iter().zip(&parsed.chapters) {
                     tx.execute(
-                        "UPDATE chapters SET title=?2,kind=?3 WHERE id=?1",
-                        params![old.0, new.title, new.kind],
+                        "UPDATE chapters SET title=?2,kind=?3,page_count=?4 WHERE id=?1",
+                        params![old.0, new.title, new.kind, new.page_count],
                     )?;
                 }
                 tx.execute(

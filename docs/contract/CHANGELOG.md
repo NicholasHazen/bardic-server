@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.5.2 (chapter reading metadata; additive)
+- `Chapter.text_length` is the exact Unicode code point length of stored text, including paragraph separators. Clients can show chapter progress from the listener's text offset without fetching every chapter's text.
+- `Chapter.page_count` is nullable source pagination: known only when valid EPUB page-list/pagebreak markers begin at the chapter start and supply consecutive numbered pages. Missing, incomplete or ambiguous pagination stays null; word counts and display size never become invented pages. Existing imports gain it through the same safe metadata refresh.
+- Chapter name fallbacks skip short mixed-case conversion artifacts such as `cD` and generic source-document identifiers, continuing to useful headings or a descriptive chapter/matter fallback. Canonical words, boundaries and identities are unchanged.
+
 ## 0.5.1 (chapter metadata and optional matter selection; additive)
 - EPUB imports recover names from EPUB 3 navigation or EPUB 2 NCX, then headings/document titles, with structural metadata and conservative title fallbacks for matter kinds. Source text stays intact.
 - New plain-text imports retain heading paragraphs in canonical text instead of dropping them; matter headings can form chapters. Old stored text stays unchanged, and refresh refuses a mismatch with the corrected importer.
