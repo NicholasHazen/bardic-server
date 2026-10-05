@@ -725,26 +725,158 @@ fn book_exists(conn: &Connection, id: &str) -> Result<(), ApiError> {
 }
 
 /// `listChapters`
+#[derive(Deserialize)]
+pub struct ChaptersQuery {
+    include_matter: Option<bool>,
+}
+
+fn chapter_values(conn: &Connection, id: &str, include_matter: bool) -> Result<Value, ApiError> {
+    let items: Vec<Value> = conn
+        .prepare("SELECT id,idx,title,kind,word_count,text_sha256 FROM chapters WHERE book_id=?1 AND (?2 OR kind='story') ORDER BY idx")?
+        .query_map(params![id, include_matter], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?, "index": r.get::<_, i64>(1)?, "title": r.get::<_, String>(2)?,
+                "kind": r.get::<_, String>(3)?, "word_count": r.get::<_, i64>(4)?, "text_sha256": r.get::<_, String>(5)?,
+            }))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(json!({ "items": items }))
+}
+
+/// `listChapters`: hiding matter preserves chapter identities and reading indices.
 pub async fn chapters(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<ChaptersQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let out = state
         .store
         .run(move |c| {
             book_exists(c, &id)?;
-            let items: Vec<Value> = c
-                .prepare("SELECT id,idx,title,kind,word_count,text_sha256 FROM chapters WHERE book_id=?1 ORDER BY idx")?
-                .query_map([&id], |r| {
-                    Ok(json!({
-                        "id": r.get::<_, String>(0)?, "index": r.get::<_, i64>(1)?, "title": r.get::<_, String>(2)?,
-                        "kind": r.get::<_, String>(3)?, "word_count": r.get::<_, i64>(4)?, "text_sha256": r.get::<_, String>(5)?,
-                    }))
-                })?
-                .collect::<Result<_, _>>()?;
-            Ok(json!({ "items": items }))
+            chapter_values(c, &id, q.include_matter.unwrap_or(true))
         })
         .await?;
+    Ok(Json(out))
+}
+
+fn source_unavailable() -> ApiError {
+    ApiError::conflict(
+        "source_unavailable",
+        "The saved original cannot be read. Chapter metadata was kept.",
+    )
+}
+
+/// `refreshBookChapters`: repair metadata only after verifying the entire stored text.
+pub async fn refresh_chapters(
+    State(state): State<AppState>,
+    device: DeviceCtx,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let lookup = id.clone();
+    let (ext, name): (Option<String>, Option<String>) = state
+        .store
+        .run(move |c| {
+            require_editable(c, &lookup)?;
+            Ok(c.query_row(
+                "SELECT source_ext,source_name FROM books WHERE id=?1",
+                [&lookup],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await?;
+
+    // Reading and parsing can be slow. Both happen outside the store lock; the
+    // book's state is checked again in the transaction before any change.
+    let parsed = async {
+        let (Some(ext), Some(name)) = (ext, name) else {
+            return Err(source_unavailable());
+        };
+        if !matches!(ext.as_str(), "epub" | "txt") {
+            return Err(source_unavailable());
+        }
+        let path = state
+            .store
+            .data_dir()
+            .join("originals")
+            .join(&id)
+            .join(format!("source.{ext}"));
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|_| source_unavailable())?;
+        tokio::task::spawn_blocking(move || crate::importer::parse(&name, &bytes))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(|_| source_unavailable())
+    }
+    .await;
+
+    let target = id.clone();
+    let (audit_id, at, actor) = (state.new_id(), state.now(), Actor::device_only(&device));
+    let (out, changed) = state
+        .store
+        .run(move |c| {
+            let tx = c.transaction()?;
+            require_editable(&tx, &target)?;
+            let parsed = parsed?;
+            // Ordered, byte-for-byte comparison of every chapter must finish
+            // before any metadata is changed. Chapter and line identities are
+            // never rebuilt, so existing audio, places and plans remain valid.
+            type StoredChapter = (String, String, String, String, i64);
+            let stored: Vec<StoredChapter> = tx
+                .prepare("SELECT id,title,kind,text,word_count FROM chapters WHERE book_id=?1 ORDER BY idx")?
+                .query_map([&target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<Result<_, _>>()?;
+            if stored.len() != parsed.chapters.len()
+                || stored.iter().zip(&parsed.chapters).any(|(old, new)| old.3 != new.text)
+            {
+                return Err(ApiError::conflict(
+                    "chapter_structure_changed",
+                    "The saved original's chapters differ from the stored text. Chapter metadata was kept.",
+                ));
+            }
+            let (mut story_words, mut story_chapters) = (0i64, 0i64);
+            let mut changed = false;
+            for (old, new) in stored.iter().zip(&parsed.chapters) {
+                if new.kind == "story" {
+                    story_words += old.4;
+                    story_chapters += 1;
+                }
+                changed |= old.1 != new.title || old.2 != new.kind;
+            }
+            let counts: (i64, i64) = tx.query_row(
+                "SELECT word_count,story_chapter_count FROM books WHERE id=?1",
+                [&target],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            changed |= counts != (story_words, story_chapters);
+            if changed {
+                for (old, new) in stored.iter().zip(&parsed.chapters) {
+                    tx.execute(
+                        "UPDATE chapters SET title=?2,kind=?3 WHERE id=?1",
+                        params![old.0, new.title, new.kind],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE books SET word_count=?2,story_chapter_count=?3 WHERE id=?1",
+                    params![target, story_words, story_chapters],
+                )?;
+                audit::record(
+                    &tx,
+                    &audit_id,
+                    &at,
+                    "book.updated",
+                    &actor,
+                    &json!({ "book_id": target }),
+                )?;
+            }
+            let out = chapter_values(&tx, &target, true)?;
+            tx.commit()?;
+            Ok((out, changed))
+        })
+        .await?;
+    if changed {
+        announce(&state, &id);
+    }
     Ok(Json(out))
 }
 

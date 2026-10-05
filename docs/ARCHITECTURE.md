@@ -45,6 +45,8 @@ Suggested crates in a Cargo workspace (start as modules in one crate and split w
 
 ## 3. Data model (sketch)
 
+Chapter structure is deterministic import metadata, separate from immutable chapter text. `importer::structure` reads EPUB navigation and whole-document semantics; `importer` applies fallback names/kinds before storage. Metadata refresh reparses the saved original outside the store lock and matches all ordered text before an atomic title/kind/count update. It never rebuilds chapter identities or revises approved job selections. Chapter list visibility and audio scope selection each use their own `include_matter` flag; premium estimates and approval share the same scope resolver.
+
 - **Identifiers** are opaque, stable and sortable (ULID is a good fit). Chapters and lines keep their ids for the life of a book's text.
 - **Text** is stored once per chapter with `text_sha256`; lines are `(id, start, end)` code point spans into it.
 - **Audio** is a file named by the hash of what it was made from (chapter text hash, voice revision, settings) and never modified. An audiobook chapter points at an audio id. Making a chapter again creates a new file; the old one stays until *free up space*.

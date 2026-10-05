@@ -553,6 +553,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/books/{book_id}/restore", post(api::books::restore))
         .route("/api/books/{book_id}/chapters", get(api::books::chapters))
         .route(
+            "/api/books/{book_id}/chapters/refresh",
+            post(api::books::refresh_chapters),
+        )
+        .route(
             "/api/books/{book_id}/chapters/{chapter_id}/text",
             get(api::books::chapter_text),
         )

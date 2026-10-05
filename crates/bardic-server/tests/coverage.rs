@@ -34,6 +34,7 @@ const IMPLEMENTED: &[&str] = &[
     "restoreBook",
     "listSeries",
     "listChapters",
+    "refreshBookChapters",
     "getChapterText",
     "searchBook",
     "getPlace",
