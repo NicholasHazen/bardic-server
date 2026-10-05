@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.5.0
+  version: 0.5.1
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -591,6 +591,12 @@ paths:
       operationId: listChapters
       tags: [Library]
       summary: Chapters of a book, in reading order
+      description: Hiding matter filters metadata only; chapter ids and original indices stay unchanged. Direct text and audio access remain available for every chapter.
+      parameters:
+        - name: include_matter
+          in: query
+          schema: {type: boolean, default: true}
+          description: Set false to hide front and back matter.
       x-bardic-cost: none
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
@@ -607,6 +613,39 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/Chapter'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/chapters/refresh:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    post:
+      operationId: refreshBookChapters
+      tags: [Library]
+      summary: Re-read chapter names and matter kinds from the saved original
+      description: |
+        Repairs display metadata for an existing book without changing text,
+        hashes, chapter or line ids, places, audio, jobs or approved plans.
+        Updates chapter titles, kinds and the book's story counts atomically,
+        only when every chapter's text and order match the saved original.
+        No provider is contacted. Repeating it without metadata changes is a no-op.
+        409 `chapter_structure_changed` when text or chapter boundaries differ,
+        `source_unavailable` when the original cannot be read, or `book_adding`,
+        `book_removed`, `deletion_pending` when the book cannot be edited.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '200':
+          description: All chapters with refreshed metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Chapter'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/books/{book_id}/chapters/{chapter_id}/text:
     parameters:
       - {$ref: '#/components/parameters/BookId'}
@@ -1116,7 +1155,11 @@ paths:
             schema:
               type: object
               properties:
-                ahead: {type: integer, minimum: 0, maximum: 5, default: 1, description: "Also queue this many following chapters behind it."}
+                ahead: {type: integer, minimum: 0, maximum: 5, default: 1, description: "Also queue this many following eligible chapters behind it."}
+                include_matter:
+                  type: boolean
+                  default: true
+                  description: Set false to skip front and back matter when queuing following free chapters. The explicitly requested chapter is still honored. Premium requests remain limited to the approved plan's chapter selection.
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
@@ -2039,6 +2082,10 @@ components:
       required: [kind]
       properties:
         kind: {type: string, enum: [whole_book, from_chapter, chapters]}
+        include_matter:
+          type: boolean
+          default: true
+          description: Set false to exclude front and back matter from this scope. Applies to all scope kinds. Estimates, approval and generation use the same selected chapters; omitted keeps the existing all-matter behavior.
         from_chapter_id: {type: [string, 'null']}
         chapter_ids:
           type: array

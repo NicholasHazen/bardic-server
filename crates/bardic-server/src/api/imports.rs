@@ -358,6 +358,10 @@ async fn run_import_inner(
         .await;
     }
 
+    // The original is now saved. Clear the upload before publishing `done`,
+    // so a client that observes completion cannot still find it in tmp.
+    let _ = tokio::fs::remove_file(&tmp).await;
+
     let (st, bid, iid, at, audit_id) = (
         state.clone(),
         book_id.clone(),
@@ -376,7 +380,6 @@ async fn run_import_inner(
             Ok(())
         })
         .await;
-    let _ = tokio::fs::remove_file(&tmp).await;
     match stored {
         Ok(()) => {
             announce(state, &import_id, Some(&book_id));

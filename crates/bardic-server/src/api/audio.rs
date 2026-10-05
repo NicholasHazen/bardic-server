@@ -137,10 +137,21 @@ fn new_job(conn: &Connection, j: NewJob) -> Result<(), ApiError> {
     Ok(())
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestIn {
     ahead: Option<i64>,
+    #[serde(default = "include_matter_by_default")]
+    include_matter: bool,
+}
+
+impl Default for RequestIn {
+    fn default() -> Self {
+        Self {
+            ahead: None,
+            include_matter: true,
+        }
+    }
 }
 
 /// `requestChapterAudio`: press play.
@@ -206,11 +217,12 @@ pub async fn request_chapter(
             }
             require_not_deleting(&tx, &t.book_id)?;
             require_ready_to_make(&t)?;
-            // The chapter first, then the next few that are not made yet.
+            // The requested chapter is explicit; the matter choice filters only automatic
+            // following chapters, before the limit so skipped matter does not use up ahead.
             let mut wanted = vec![chapter.clone()];
             let following: Vec<String> = tx
-                .prepare("SELECT id FROM chapters WHERE book_id=?1 AND idx>?2 ORDER BY idx LIMIT ?3")?
-                .query_map(params![t.book_id, idx, ahead], |r| r.get(0))?
+                .prepare("SELECT id FROM chapters WHERE book_id=?1 AND idx>?2 AND (?4 OR kind='story') ORDER BY idx LIMIT ?3")?
+                .query_map(params![t.book_id, idx, ahead, input.include_matter], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
             for f in following {
                 if !has_audio(&tx, &audiobook, &f)? {
@@ -254,12 +266,22 @@ pub struct ScopeIn {
     pub kind: String,
     pub from_chapter_id: Option<String>,
     pub chapter_ids: Option<Vec<String>>,
+    #[serde(default = "include_matter_by_default")]
+    pub include_matter: bool,
+}
+
+fn include_matter_by_default() -> bool {
+    true
 }
 
 impl ScopeIn {
     /// The contract's `Scope`.
     pub fn value(&self) -> Value {
-        let mut v = json!({ "kind": self.kind, "from_chapter_id": self.from_chapter_id });
+        let mut v = json!({
+            "kind": self.kind,
+            "from_chapter_id": self.from_chapter_id,
+            "include_matter": self.include_matter,
+        });
         if let Some(c) = &self.chapter_ids {
             v["chapter_ids"] = json!(c);
         }
@@ -267,28 +289,25 @@ impl ScopeIn {
     }
 }
 
-/// The chapters a scope names, in reading order.
+/// The chapters a scope names, in reading order. Validate named chapters before filtering
+/// matter, so excluding matter never masks an invalid anchor or an unknown chapter id.
 pub fn resolve_scope(
     tx: &Connection,
     book_id: &str,
     scope: &ScopeIn,
 ) -> Result<Vec<String>, ApiError> {
-    let ordered: Vec<(String, i64)> = tx
-        .prepare("SELECT id,idx FROM chapters WHERE book_id=?1 ORDER BY idx")?
-        .query_map([book_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let ordered: Vec<(String, i64, String)> = tx
+        .prepare("SELECT id,idx,kind FROM chapters WHERE book_id=?1 ORDER BY idx")?
+        .query_map([book_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
-    Ok(match scope.kind.as_str() {
-        "whole_book" => ordered.iter().map(|(id, _)| id.clone()).collect(),
+    let selected: Vec<&(String, i64, String)> = match scope.kind.as_str() {
+        "whole_book" => ordered.iter().collect(),
         "from_chapter" => {
             let from = scope.from_chapter_id.as_deref().ok_or_else(|| {
                 ApiError::invalid("invalid_request", "from_chapter needs from_chapter_id.")
             })?;
             let idx = chapter_index(tx, book_id, from)?;
-            ordered
-                .iter()
-                .filter(|(_, i)| *i >= idx)
-                .map(|(id, _)| id.clone())
-                .collect()
+            ordered.iter().filter(|(_, i, _)| *i >= idx).collect()
         }
         "chapters" => {
             let ids = scope
@@ -303,8 +322,7 @@ pub fn resolve_scope(
             }
             ordered
                 .iter()
-                .filter(|(id, _)| ids.contains(id))
-                .map(|(id, _)| id.clone())
+                .filter(|(id, _, _)| ids.contains(id))
                 .collect()
         }
         _ => {
@@ -313,7 +331,12 @@ pub fn resolve_scope(
                 "scope.kind must be whole_book, from_chapter or chapters.",
             ))
         }
-    })
+    };
+    Ok(selected
+        .into_iter()
+        .filter(|(_, _, kind)| scope.include_matter || kind == "story")
+        .map(|(id, _, _)| id.clone())
+        .collect())
 }
 
 #[derive(Deserialize)]

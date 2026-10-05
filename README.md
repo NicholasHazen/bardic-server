@@ -2,7 +2,7 @@
 
 The server half of Bardic v2: it turns books you own into audiobooks on your own computer. It stores books and text, talks to voice sources (Breeze, Gemini, voices on this computer), makes and keeps audio, runs plans with limits, and keeps each listener's place. Clients (see the `bardic-web` repository) talk to it over the HTTP contract in this repository.
 
-**Status: M0–M7 implemented; contract 0.5.0 adds sample safeguards and Ready-file recovery.** Every operation in the contract is implemented, including free and premium audio, plans and Allowance, offline manifests, space management, deletion with Undo, export and backup. Foreign browser sample requests are refused before spending, concurrent samples share one provider request, and missing Ready files become unavailable without automatic paid repair. See the roadmap for verification and remaining limits. Try it with [docs/CURL.md](docs/CURL.md).
+**Status: M0–M7 implemented; contract 0.5.1 adds chapter metadata refresh and matter selection.** Every operation in the contract is implemented, including free and premium audio, plans and Allowance, offline manifests, space management, deletion with Undo, export and backup. Foreign browser sample requests are refused before spending, concurrent samples share one provider request, and missing Ready files become unavailable without automatic paid repair. See the roadmap for verification and remaining limits. Try it with [docs/CURL.md](docs/CURL.md).
 
 ## Start here
 
@@ -40,7 +40,7 @@ cargo clippy --all-targets -- -D warnings && cargo fmt --check
 
 ## Container deployment
 
-The root Dockerfile builds a non-root Linux server image with ffmpeg and a persistent `/data` directory. The web repository owns the two-service Compose stack and [deployment guide](../bardic-web/docs/DEPLOYMENT.md), including host ownership, private HTTPS, backups and restores. Run one server per local data directory. SIGTERM and SIGINT both drain the server before releasing its lock; Compose allows five minutes for admitted samples to settle. The API contract remains 0.5.0.
+The root Dockerfile builds a non-root Linux server image with ffmpeg and a persistent `/data` directory. The web repository owns the two-service Compose stack and [deployment guide](../bardic-web/docs/DEPLOYMENT.md), including host ownership, private HTTPS, backups and restores. Run one server per local data directory. SIGTERM and SIGINT both drain the server before releasing its lock; Compose allows five minutes for admitted samples to settle. The API contract is 0.5.1.
 
 `docker build --target verify .` runs formatting, Clippy and the complete offline test suite, including contract and shutdown-signal tests. The web repository's Spark updater uses this gate before building and promoting a paired release from both `main` branches. Live provider tests remain ignored. Runtime images keep tests and build tools out of the final image.
 

@@ -2,7 +2,7 @@
 
 `openapi.yaml` (OpenAPI 3.1) is the normative interface between the Bardic server and its clients. It is written from [`docs/PRODUCT-SPEC.md`](../PRODUCT-SPEC.md), not from the prototype. Clients are generated from it; a server is correct when it satisfies it.
 
-**Status:** draft 0.5.0, pre-release. Until 1.0.0, additive changes bump the patch and breaking changes bump the minor.
+**Status:** draft 0.5.1, pre-release. Until 1.0.0, additive changes bump the patch and breaking changes bump the minor.
 
 **Validate:** `uv run --with openapi-spec-validator --with pyyaml python -c "from openapi_spec_validator import validate; from openapi_spec_validator.readers import read_from_filename as r; validate(r('openapi.yaml')[0])"`
 

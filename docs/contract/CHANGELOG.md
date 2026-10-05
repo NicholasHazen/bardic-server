@@ -2,6 +2,14 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.5.1 (chapter metadata and optional matter selection; additive)
+- EPUB imports recover names from EPUB 3 navigation or EPUB 2 NCX, then headings/document titles, with structural metadata and conservative title fallbacks for matter kinds. Source text stays intact.
+- New plain-text imports retain heading paragraphs in canonical text instead of dropping them; matter headings can form chapters. Old stored text stays unchanged, and refresh refuses a mismatch with the corrected importer.
+- `listChapters` accepts `include_matter=false` to hide front/back matter while preserving ids and indices. The default remains all chapters.
+- `Scope.include_matter=false` excludes matter from free make-ready and premium previews/approved plans, including explicit chapter scopes. Omitted defaults to true for existing clients and stored plans. Selection is independent of list visibility.
+- `requestChapterAudio.include_matter=false` skips matter in free ahead-of-playback generation; the explicitly requested chapter is still honored. Premium generation stays inside the approved selection.
+- `refreshBookChapters` re-reads the saved original to repair chapter names/kinds and story counts. It refuses any text/order/boundary mismatch and retains all ids, text, audio, places and existing plan selections; no provider work starts.
+
 ## 0.5.0 (sample safeguards and Ready-file recovery; tightens browser origin checks)
 - `getVoiceSample` (including implicit HEAD) now refuses foreign browser provenance before it can generate audio or spend. Clients serving the web app from a separate origin must configure `--allow-origin`, as for writes. Requests with no Origin use Referer and Fetch Metadata when present; direct navigation with Fetch Metadata remains allowed. **Scripts must send `X-Bardic-Device` when every browser provenance header is absent.** The web client already sends it. This closes no-referrer media/no-cors requests on plain HTTP LAN addresses where Fetch Metadata may be omitted. The sample operation documents 403 `origin_not_allowed`.
 - Concurrent sample cache misses for one voice revision share one generation and one spending record. A client disconnect does not cancel provider settlement or cause a duplicate request; a failed attempt permits a later deliberate retry.

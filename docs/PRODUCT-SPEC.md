@@ -131,6 +131,7 @@ Requirement IDs are stable references for tests and tasks. "Must" is required fo
 - **A8.** Home (`[Home]`, `[HomeTablet]`, `[HomeEmpty]`, `[HomeOffline]`): the current listener's Continue item, On this device, Recently added. A finished book leaves Continue.
 - **A9.** Edit details (`[Manage]`): title, author, series and order, cover refresh. Never changes text.
 - **A10.** Book menu (`[BookMenu]`): mark finished, mark not started, edit details, free up space, remove from library.
+- **A11.** Adding a book recovers chapter names from its table of contents, with headings as a fallback, and identifies front and back matter. Matter is kept readable and can be voiced by choice. Existing books can refresh chapter names and matter labels from the saved original; a refresh preserves text, chapter and line identities, places and audio, and refuses changed text or chapter boundaries.
 
 ### 5.3 Book page and audiobooks
 
@@ -139,7 +140,7 @@ Requirement IDs are stable references for tests and tasks. "Must" is required fo
 - **B3.** Other audiobooks for the book are listed below with their own readiness. Choosing one makes it this listener's current audiobook; the place is kept (D1).
 - **B4.** Chapter rows carry exactly one audio word: *On this device*, *Ready*, *Making*, *Not yet* (section 6), plus *Downloading*, *Couldn't download* or *Out of date* on a device where applicable.
 - **B5.** Pressing play on a chapter that is *Not yet* makes it on demand (section 7.2); it does not require a plan if the voice is free.
-- **B6.** The chapter list can be filtered to exclude front and back matter; matter is skipped by "next chapter" by default but can be played.
+- **B6.** The book page and player chapter list offer **Hide front and back matter**. This changes the visible list only; matter stays available when shown again. Matter is skipped by "next chapter" and automatic generation ahead by default but can be played explicitly. The choice to include matter when making audio is separate from list visibility.
 
 ### 5.4 Voices
 
@@ -202,6 +203,7 @@ See section 8 for the model. Requirements:
 - **PL9.** Setting a monthly limit below current spending is allowed. It blocks new plans and stops running plans at their next chapter boundary, keeping completed work. Turning the limit off never changes a running plan's own limit.
 - **PL10.** Every plan, approval, stop and Allowance change records which listener and device did it.
 - **PL11.** A rejected or expired key stops running plans at the next request, keeps completed chapters, and shows the key problem (`[KeyProblem]`). Free voices are unaffected.
+- **PL12.** Free make-ready confirmation and premium plan preview offer **Include front and back matter**, off by default in new client flows. The selected chapters determine the text size, estimate and audio made; changing this choice requires a new preview before approval. An approved plan keeps its chapter selection. Matter omitted now can be made later; finished audio is kept.
 
 ### 5.9 Offline and downloads
 
@@ -354,6 +356,8 @@ Each promise and decision has at least these tests.
 - **D9.** A plan hitting a provider quota becomes Waiting, resumes after the reset with no new approval, never exceeds its original limit.
 - **C6.** Place at 98% unchanged for 24 hours becomes finished; any change restarts the clock.
 - **A3.** Re-adding the same file warns with the existing book; adding a different file with the same title does not.
+- **A11.** Synthetic EPUB 3 navigation and EPUB 2 NCX recover chapter names in spine order. Structural matter labels take precedence over title guesses. Refresh names on an existing book: every chapter/line id, text hash, stored text, audio and place revision remains unchanged; a text or boundary mismatch changes nothing.
+- **B6 / PL12.** Hide matter, show it again, and read it directly. Make audio with matter excluded: only story chapters are generated, premium estimates include only those chapters, and the approved plan cannot spend on excluded matter. Include matter later: existing story audio is reused.
 - **O3.** Airplane mode: downloaded chapters play and Read works; others say why they are unavailable.
 
 ## 12. Screen and state inventory

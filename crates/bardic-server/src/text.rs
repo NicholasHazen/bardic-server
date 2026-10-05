@@ -128,6 +128,7 @@ pub fn extract_markup(html: &str) -> Extracted {
     let mut in_heading: Option<String> = None;
     let mut heading_buf = String::new();
     let mut in_title = false;
+    let mut in_head = false;
     let mut title_buf = String::new();
     let mut i = 0;
 
@@ -177,19 +178,28 @@ pub fn extract_markup(html: &str) -> Extracted {
                 continue;
             }
             if name == "head" {
-                if !closing && !self_closing {
-                    skip_depth = Some(name);
+                in_head = !closing && !self_closing;
+                if !in_head {
+                    in_title = false;
                 }
                 continue;
             }
+            if name == "body" && !closing {
+                // Recover from an unclosed title/head in converted HTML.
+                in_head = false;
+                in_title = false;
+            }
             if name == "title" {
-                in_title = !closing;
+                in_title = !closing && !self_closing;
                 if closing && doc_title.is_none() {
                     let t = collapse(&title_buf);
                     if !t.is_empty() {
                         doc_title = Some(t);
                     }
                 }
+                continue;
+            }
+            if in_head {
                 continue;
             }
             if name == "br" {
@@ -214,7 +224,7 @@ pub fn extract_markup(html: &str) -> Extracted {
             }
             continue;
         }
-        if skip_depth.is_some() {
+        if skip_depth.is_some() || (in_head && !in_title) {
             i += 1;
             continue;
         }
@@ -326,9 +336,12 @@ fn split_paragraph(p: &str) -> Vec<(usize, usize)> {
 
 /// Heuristic chapter kind from a title.
 pub fn kind_from_title(title: &str) -> &'static str {
-    let t = title.to_lowercase();
+    let t = collapse(title).to_lowercase();
+    let t = t.trim_matches(|c: char| c.is_whitespace() || matches!(c, '.' | ':' | '-' | '—' | '–'));
     const FRONT: &[&str] = &[
         "cover",
+        "cover page",
+        "toc",
         "title page",
         "titlepage",
         "table of contents",
@@ -338,19 +351,47 @@ pub fn kind_from_title(title: &str) -> &'static str {
         "epigraph",
         "imprint",
         "half title",
+        "halftitlepage",
+        "front matter",
+        "foreword",
+        "preface",
+        "introduction",
     ];
     const BACK: &[&str] = &[
-        "acknowledg",
+        "acknowledgments",
+        "acknowledgements",
         "about the author",
         "colophon",
         "also by",
         "other books",
         "author's note",
         "praise for",
+        "back matter",
+        "afterword",
+        "appendix",
+        "appendices",
+        "bibliography",
+        "glossary",
+        "index",
     ];
-    if FRONT.iter().any(|k| t == *k || t.starts_with(k)) {
+    // Exact labels, a subtitle separator or a year/number are evidence of
+    // matter. Ordinary prose such as "Cover the lantern" is not a heading.
+    let matches = |k: &&str| {
+        t.strip_prefix(*k)
+            .map(|rest| {
+                let word_suffix = rest.starts_with(char::is_whitespace);
+                let rest = rest.trim_start();
+                rest.is_empty()
+                    || rest.starts_with(|c: char| {
+                        c.is_numeric() || matches!(c, ':' | '-' | '—' | '–' | '·' | '(' | '©')
+                    })
+                    || matches!(*k, "also by" | "other books" | "praise for") && word_suffix
+            })
+            .unwrap_or(false)
+    };
+    if FRONT.iter().any(matches) {
         "front_matter"
-    } else if BACK.iter().any(|k| t.contains(k)) {
+    } else if BACK.iter().any(matches) {
         "back_matter"
     } else {
         "story"
@@ -367,19 +408,18 @@ pub fn split_plain_chapters(
     let is_word_heading = |p: &str| {
         let l = p.to_lowercase();
         p.chars().count() <= 80
-            && [
-                "chapter ",
-                "part ",
-                "book ",
-                "prologue",
-                "epilogue",
-                "interlude",
-                "preface",
-                "introduction",
-                "section ",
-            ]
-            .iter()
-            .any(|k| l.starts_with(k) || l == k.trim())
+            && (kind_from_title(p) != "story"
+                || [
+                    "chapter ",
+                    "part ",
+                    "book ",
+                    "prologue",
+                    "epilogue",
+                    "interlude",
+                    "section ",
+                ]
+                .iter()
+                .any(|k| l.starts_with(k) || l == k.trim()))
     };
     let is_roman = |p: &str| {
         let t = p.trim_end_matches('.');
@@ -400,7 +440,9 @@ pub fn split_plain_chapters(
             is_word_heading(&p)
         };
         if heading {
-            chapters.push((p, Vec::new()));
+            // A heading is display metadata and also source text. Keep it in
+            // the spoken/read text just as EPUB headings are kept.
+            chapters.push((p.clone(), vec![p]));
         } else if let Some(last) = chapters.last_mut() {
             last.1.push(p);
         } else {
@@ -505,7 +547,7 @@ mod tests {
         let ch = split_plain_chapters(paras, "Text");
         let titles: Vec<&str> = ch.iter().map(|c| c.0.as_str()).collect();
         assert_eq!(titles, ["Beginning", "Chapter 1", "Chapter 2: The River"]);
-        assert_eq!(ch[2].1, ["Body two.", "More."]);
+        assert_eq!(ch[2].1, ["Chapter 2: The River", "Body two.", "More."]);
     }
 
     #[test]
@@ -521,5 +563,66 @@ mod tests {
         assert_eq!(kind_from_title("Table of Contents"), "front_matter");
         assert_eq!(kind_from_title("Acknowledgements"), "back_matter");
         assert_eq!(kind_from_title("Chapter 1: Ash"), "story");
+        assert_eq!(
+            kind_from_title("Preface: Before the crossing"),
+            "front_matter"
+        );
+        assert_eq!(kind_from_title("Afterword"), "back_matter");
+        assert_eq!(kind_from_title("Copyrighted River"), "story");
+        assert_eq!(kind_from_title("Covering the Distance"), "story");
+        assert_eq!(
+            kind_from_title("The Acknowledgements of a Stranger"),
+            "story"
+        );
+        assert_eq!(kind_from_title("Chapter 3: About the Author"), "story");
+    }
+
+    #[test]
+    fn document_title_is_metadata_and_heading_wins() {
+        let e = extract_markup("<html><head><title>The &amp; Crossing</title></head><body><p>Words stay here.</p></body></html>");
+        assert_eq!(e.title.as_deref(), Some("The & Crossing"));
+        assert_eq!(e.paragraphs, ["Words stay here."]);
+        let e = extract_markup("<html><head><title>Generic</title></head><body><h2>Real chapter</h2><p>Words.</p></body></html>");
+        assert_eq!(e.title.as_deref(), Some("Real chapter"));
+        for html in [
+            "<html><head><title/></head><body><p>Words stay here.</p></body></html>",
+            "<html><head><title>Unclosed</head><body><p>Words stay here.</p></body></html>",
+            "<html><head><title>Unclosed<body><p>Words stay here.</p></body></html>",
+        ] {
+            assert_eq!(extract_markup(html).paragraphs, ["Words stay here."]);
+        }
+    }
+
+    #[test]
+    fn plain_matter_and_story_headings_keep_every_word() {
+        let original = "Copyright\n\nAn original notice.\n\nChapter 1: Café 😀\n\nThe ferry moved.\n\nAcknowledgements\n\nThanks to the crew.";
+        let paragraphs = paragraphs_from_plain(original);
+        let chapters = split_plain_chapters(paragraphs.clone(), "Ferry");
+        assert_eq!(chapters.len(), 3);
+        let joined: Vec<_> = chapters
+            .iter()
+            .flat_map(|(_, ps)| ps.iter().cloned())
+            .collect();
+        assert_eq!(joined, paragraphs);
+    }
+
+    #[test]
+    fn prose_starting_with_a_matter_word_stays_in_the_story() {
+        let paragraphs = [
+            "Chapter 1",
+            "Cover the lantern before the rain comes.",
+            "Index the parcels before dawn.",
+            "Introduction of the new ferry changed the town.",
+            "Chapter 2",
+            "The lantern glowed.",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let chapters = split_plain_chapters(paragraphs.clone(), "Ferry");
+        assert_eq!(chapters.len(), 2);
+        assert!(paragraphs[1..4]
+            .iter()
+            .all(|p| kind_from_title(p) == "story"));
+        assert_eq!(chapters[0].1, paragraphs[..4]);
     }
 }
