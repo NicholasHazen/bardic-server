@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.93.1-slim-bookworm@sha256:5b9332190bb3b9ece73b810cd1f1e9f06343b294ce184bcb067f0747d7d333ea AS build
+FROM rust:1.93.1-slim-bookworm@sha256:5b9332190bb3b9ece73b810cd1f1e9f06343b294ce184bcb067f0747d7d333ea AS source
 WORKDIR /app
+# Leave room for other Spark workloads; callers can choose a different build limit.
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -10,6 +13,24 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/bardic-server/Cargo.toml crates/bardic-server/Cargo.toml
 COPY crates/bardic-server/src/ crates/bardic-server/src/
 COPY crates/bardic-server/migrations/ crates/bardic-server/migrations/
+
+# Explicit deployment gate, including every integration test and the normative
+# contract used by their conformance harness. Live provider tests stay ignored.
+FROM source AS verify
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add rustfmt clippy
+COPY crates/bardic-server/tests/ crates/bardic-server/tests/
+COPY docs/contract/ docs/contract/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo fmt --check \
+    && cargo clippy --locked --all-targets -- -D warnings \
+    && cargo test --locked
+
+FROM source AS build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \

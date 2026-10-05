@@ -1,4 +1,4 @@
-# Only source needed to build the server is sent to Docker. Never include a library.
+# Only source and synthetic validation fixtures are sent to Docker. Never include a library.
 **
 !Dockerfile
 !.dockerignore
@@ -11,6 +11,11 @@
 !crates/bardic-server/src/**
 !crates/bardic-server/migrations
 !crates/bardic-server/migrations/**
+!crates/bardic-server/tests
+!crates/bardic-server/tests/**
+!docs
+!docs/contract
+!docs/contract/**
 **/.env
 **/.env.*
 **/*.pem
