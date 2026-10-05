@@ -38,6 +38,10 @@ cargo test                                          # includes contract conforma
 cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
 
+## Container deployment
+
+The root Dockerfile builds a non-root Linux server image with ffmpeg and a persistent `/data` directory. The web repository owns the two-service Compose stack and [deployment guide](../bardic-web/docs/DEPLOYMENT.md), including host ownership, private HTTPS, backups and restores. Run one server per local data directory. SIGTERM and SIGINT both drain the server before releasing its lock; Compose allows five minutes for admitted samples to settle. The API contract remains 0.5.0.
+
 ## Principles in one breath
 
 Text is never changed. Nothing paid starts without a plan you approved. Finished audio is always kept. Unknown cost is shown as unknown. A listener's place follows them, and they choose when two places disagree.

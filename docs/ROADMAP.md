@@ -16,7 +16,15 @@ Milestones end with exit criteria that can be checked against the spec's accepta
 
 Out of scope until the spec changes: characters, casting, performances, voice design and cloning, roles and passwords, notifications.
 
-## Current verification, 2026-10-02
+## Container deployment verification, 2026-10-05
+
+The root Dockerfile builds the server for Linux with ffmpeg/curl, UID/GID 10001 and only source/migrations in its build context. The web repository owns Compose, Caddy and the [operator guide](../../bardic-web/docs/DEPLOYMENT.md). Keep the whole data folder on a local filesystem and use one server instance. The API contract remains 0.5.0.
+
+Unix SIGTERM and SIGINT now enter the same graceful shutdown path, with handlers installed before startup. Two real-process regressions use a delayed fake premium provider and client cancellation: shutdown retains the single-writer lock while settling usage and publishing the sample, exits successfully, then a restart reuses the sample without another provider request. Non-Unix retains Ctrl+C handling. Formatting, all-target Clippy, all 193 enabled tests and the release build pass; four live/performance tests stay ignored.
+
+Both production images built and ran as Linux arm64 in Docker Desktop on this macOS host. The container smoke passed synthetic Unicode import, metadata/listener/settings/place retention, audio SHA/Range/timings, real ffmpeg M4B, default Docker SIGTERM exit 0 and server recreation behind a still-running gateway. The API backup was copied and restored into a fresh bind mount: text/audio/place/settings survived and the synthetic provider key was absent. The test never used a real provider or an existing library. Base manifests include amd64, but that architecture and an actual Linux/NAS host, host reboot, remote HTTPS/voice-source routing and power loss remain unverified.
+
+## Verification, 2026-10-02
 
 Contract 0.5.0 validates as OpenAPI 3.1. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, all 191 enabled tests and the release build pass. Four live/performance tests remain ignored in the default suite. This repair used temporary synthetic books/audio and local fake Breeze/Gemini; no live paid request was made.
 
