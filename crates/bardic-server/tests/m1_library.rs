@@ -48,8 +48,10 @@ async fn the_sample_book_is_readable_at_once_with_exact_lines() {
     assert_eq!(book["state"], "readable");
     assert_eq!(book["title"], "The Lantern Keeper");
     assert_eq!(book["chapter_count"], 3);
+    assert_eq!(book["story_chapter_count"], 3);
     assert!(book["word_count"].as_i64().unwrap() > 300);
-    assert_eq!(book["cover"], Value::Null);
+    assert_eq!(book["cover"]["generated"], true);
+    assert_eq!(book["cover"]["sample"]["vivid"], true);
     assert_eq!(book["place"], Value::Null);
     let id = book["id"].as_str().unwrap();
 
@@ -92,8 +94,9 @@ async fn the_sample_book_is_readable_at_once_with_exact_lines() {
     assert_eq!(t["text_sha256"], items[0]["text_sha256"]);
     assert_eq!(common_sha(text), t["text_sha256"].as_str().unwrap());
 
-    let e = s.get(BID, &format!("{B}/{id}/cover"), 404).await;
-    assert_eq!(e["code"], "cover_not_found");
+    // Every readable book has a cover (here a generated one); an unknown book has none.
+    let e = s.get(BID, &format!("{B}/nope/cover"), 404).await;
+    assert_eq!(e["code"], "book_not_found");
     let e = s
         .get(
             "/api/books/{book_id}/chapters/{chapter_id}/text",
@@ -133,6 +136,7 @@ async fn a_text_file_becomes_a_book_with_chapters_and_its_original_is_kept() {
     assert_eq!(book["title"], "river days");
     assert_eq!(book["author"], "");
     assert_eq!(book["chapter_count"], 2);
+    assert_eq!(book["story_chapter_count"], 2);
     assert_eq!(book["source_sha256"], expect_sha.as_str());
     let original = s.dir.path().join("originals").join(id).join("source.txt");
     assert!(original.exists(), "original kept at {}", original.display());
@@ -766,6 +770,12 @@ async fn search_is_case_insensitive_and_offsets_point_at_the_match() {
     assert_eq!(p2["next"], Value::Null);
     assert_eq!(s.get(t, &q("q=zzzz"), 200).await["total"], 0);
     assert_eq!(s.get(t, &q("q="), 400).await["code"], "invalid_request");
+    // a search term has a size limit: it is scanned against every chapter
+    s.get(t, &q(&format!("q={}", "a".repeat(200))), 200).await;
+    assert_eq!(
+        s.get(t, &q(&format!("q={}", "a".repeat(201))), 400).await["code"],
+        "invalid_request"
+    );
     assert_eq!(
         s.get(t, &format!("{B}/nope/search?q=a"), 404).await["code"],
         "book_not_found"
@@ -807,5 +817,29 @@ async fn library_changes_are_announced() {
     assert!(ok, "missing notices; saw {seen}");
     drop(resp);
     let _ = name_body;
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn an_epub_that_lists_the_same_chapter_many_times_is_read_once() {
+    let (s, _) = server_with_listener().await;
+    let id = s
+        .add_book(
+            "loop.epub",
+            Epub {
+                spine_repeats: 500,
+                ..Default::default()
+            }
+            .build(),
+        )
+        .await;
+    let ch = s
+        .get(
+            "/api/books/{book_id}/chapters",
+            &format!("/api/books/{id}/chapters"),
+            200,
+        )
+        .await;
+    assert_eq!(ch["items"].as_array().unwrap().len(), 2, "{ch}");
     s.stop().await;
 }

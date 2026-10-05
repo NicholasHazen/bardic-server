@@ -18,6 +18,8 @@ pub struct Fake {
     pub reference: Vec<u8>,
     /// Every text sent to the speech endpoint, in order.
     pub spoken: Vec<String>,
+    /// Requests admitted to speech, counted before any response delay.
+    pub received: usize,
     /// Answer the speech endpoint with 503 this many times first.
     pub busy_left: u32,
     /// Refuse speech with this error code.
@@ -88,6 +90,7 @@ async fn reference(
 async fn speech(State(f): State<Shared>, Json(body): Json<Value>) -> Response {
     let (delay, busy, refuse, down) = {
         let mut f = f.lock().unwrap();
+        f.received += 1;
         let busy = f.busy_left > 0;
         if busy {
             f.busy_left -= 1;
@@ -191,5 +194,9 @@ impl FakeBreeze {
 
     pub fn spoken(&self) -> Vec<String> {
         self.state.lock().unwrap().spoken.clone()
+    }
+
+    pub fn received(&self) -> usize {
+        self.state.lock().unwrap().received
     }
 }

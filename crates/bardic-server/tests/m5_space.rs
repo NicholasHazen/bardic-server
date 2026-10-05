@@ -560,6 +560,16 @@ async fn a_scheduled_deletion_survives_a_restart() {
 async fn a_backup_is_a_consistent_database_copy_with_the_media_linked_in() {
     let f = Fx::new().await;
     f.make_all().await;
+    // a source with a key, set directly: the backup must not carry it
+    {
+        let db = rusqlite::Connection::open(f.s.dir.path().join("bardic.db")).unwrap();
+        db.busy_timeout(StdDuration::from_secs(5)).unwrap();
+        db.execute(
+            "UPDATE voice_sources SET config='{\"base_url\":\"http://10.0.0.5:7860\",\"api_key\":\"sekrit-key-123\"}' WHERE id='breeze'",
+            [],
+        )
+        .unwrap();
+    }
     assert_eq!(
         f.s.get("/api/backups", "/api/backups", 200).await["items"]
             .as_array()
@@ -581,8 +591,30 @@ async fn a_backup_is_a_consistent_database_copy_with_the_media_linked_in() {
     }
     assert_eq!(done["state"], "done", "{done}");
     assert_eq!(done["id"], b["id"]);
-    let dir = std::path::PathBuf::from(done["path"].as_str().unwrap());
+    // clients are told a place inside the data folder, not where the server keeps it
+    assert_eq!(
+        done["path"],
+        format!("backups/{}", b["id"].as_str().unwrap())
+    );
+    let dir = f.s.dir.path().join(done["path"].as_str().unwrap());
     assert!(done["bytes"].as_i64().unwrap() > 1000);
+    let raw = std::fs::read(dir.join("bardic.db")).unwrap();
+    assert!(
+        !raw.windows(14).any(|w| w == b"sekrit-key-123"),
+        "the backup file still holds the key somewhere"
+    );
+    let live = rusqlite::Connection::open(f.s.dir.path().join("bardic.db")).unwrap();
+    let kept: String = live
+        .query_row(
+            "SELECT config FROM voice_sources WHERE id='breeze'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        kept.contains("sekrit-key-123"),
+        "the live database keeps its key"
+    );
 
     // the copy opens, and holds the book
     let conn = rusqlite::Connection::open_with_flags(
@@ -849,5 +881,249 @@ async fn a_premium_audiobook_says_what_making_it_again_would_cost() {
         "nothing made yet, nothing to remake"
     );
     assert_eq!(sp["remake_estimate"]["basis"], "manual");
+    s.stop().await;
+}
+
+/// Runs the real ffmpeg (skipped when it is not installed): the file must be a real M4B whose
+/// chapter markers and duration match the chapters that were exported.
+#[tokio::test]
+async fn a_real_ffmpeg_makes_a_playable_m4b_with_chapter_markers() {
+    let ffmpeg = std::env::var("BARDIC_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+    let ffprobe = std::env::var("BARDIC_FFPROBE").unwrap_or_else(|_| "ffprobe".to_string());
+    let have = |p: &str| {
+        std::process::Command::new(p)
+            .arg("-version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !have(&ffmpeg) || !have(&ffprobe) {
+        eprintln!("skipped: ffmpeg and ffprobe are not installed");
+        return;
+    }
+    let f = Fx::with(move |c| c.ffmpeg = ffmpeg).await;
+    f.make_all().await;
+    let ex = format!("/api/audiobooks/{}/exports", f.audiobook);
+    let e =
+        f.s.call(
+            Method::POST,
+            "/api/audiobooks/{audiobook_id}/exports",
+            &ex,
+            Some(DEVICE),
+            None,
+            202,
+        )
+        .await;
+    let id = e["id"].as_str().unwrap().to_string();
+    let mut ready = Value::Null;
+    for _ in 0..400 {
+        ready =
+            f.s.get(
+                "/api/exports/{export_id}",
+                &format!("/api/exports/{id}"),
+                200,
+            )
+            .await;
+        if ready["state"] != "running" {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+    }
+    assert_eq!(ready["state"], "ready", "{ready}");
+    let (_, body) =
+        f.s.raw(
+            "/api/exports/{export_id}/file",
+            &format!("/api/exports/{id}/file"),
+            &[],
+            200,
+        )
+        .await;
+    let out = f.s.dir.path().join("probe.m4b");
+    std::fs::write(&out, &body).unwrap();
+    let probe = std::process::Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-of",
+            "json",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(probe.status.success(), "ffprobe could not read the export");
+    let j: Value = serde_json::from_slice(&probe.stdout).unwrap();
+    eprintln!(
+        "export: {} bytes, {}",
+        body.len(),
+        j["format"]["format_name"]
+    );
+    assert!(j["format"]["format_name"].as_str().unwrap().contains("mp4"));
+    let audio: Vec<&Value> = j["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["codec_type"] == "audio")
+        .collect();
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0]["codec_name"], "aac");
+    assert_eq!(audio[0]["channels"], 1);
+    let chapters = j["chapters"].as_array().unwrap();
+    assert_eq!(chapters.len(), f.chapters.len(), "{}", j["chapters"]);
+    let mut prev_end = 0.0;
+    for c in chapters {
+        let (a, b) = (
+            c["start_time"].as_str().unwrap().parse::<f64>().unwrap(),
+            c["end_time"].as_str().unwrap().parse::<f64>().unwrap(),
+        );
+        assert!(
+            a >= prev_end - 0.05 && b > a,
+            "chapters overlap: {chapters:?}"
+        );
+        prev_end = b;
+    }
+    let dur: f64 = j["format"]["duration"].as_str().unwrap().parse().unwrap();
+    assert!(
+        (dur - prev_end).abs() < 0.5,
+        "chapters end at {prev_end}s but the file is {dur}s"
+    );
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn asking_for_an_export_or_a_backup_again_returns_the_one_under_way() {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = tempfile::tempdir().unwrap();
+    let path = tools.path().join("slow-ffmpeg");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n[ \"$1\" = \"-version\" ] && exit 0\nsleep 1\nfor a in \"$@\"; do last=\"$a\"; done\nprintf M4B > \"$last\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ff = path.to_string_lossy().to_string();
+    let f = Fx::with(move |c| c.ffmpeg = ff).await;
+    f.make_all().await;
+    let ex = format!("/api/audiobooks/{}/exports", f.audiobook);
+    let tpl = "/api/audiobooks/{audiobook_id}/exports";
+    let a =
+        f.s.call(Method::POST, tpl, &ex, Some(DEVICE), None, 202)
+            .await;
+    let b =
+        f.s.call(Method::POST, tpl, &ex, Some(DEVICE), None, 202)
+            .await;
+    assert_eq!(
+        a["id"], b["id"],
+        "the second request must not start a second ffmpeg"
+    );
+    let id = a["id"].as_str().unwrap().to_string();
+    for _ in 0..200 {
+        let e =
+            f.s.get(
+                "/api/exports/{export_id}",
+                &format!("/api/exports/{id}"),
+                200,
+            )
+            .await;
+        if e["state"] != "running" {
+            assert_eq!(e["state"], "ready");
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+    }
+    // once it has finished a new export is a new one
+    let c =
+        f.s.call(Method::POST, tpl, &ex, Some(DEVICE), None, 202)
+            .await;
+    assert_ne!(c["id"], a["id"]);
+
+    // a backup recorded as running (as if one were under way) is returned, not doubled
+    let db = rusqlite::Connection::open(f.s.dir.path().join("bardic.db")).unwrap();
+    db.busy_timeout(StdDuration::from_secs(5)).unwrap();
+    db.execute("UPDATE backups SET state='done' WHERE state='running'", [])
+        .unwrap();
+    db.execute(
+        "INSERT INTO backups(id,state,created_at) VALUES('01RUNNINGBACKUP','running','2026-01-15T11:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    let r =
+        f.s.call(
+            Method::POST,
+            "/api/backups",
+            "/api/backups",
+            Some(DEVICE),
+            None,
+            202,
+        )
+        .await;
+    assert_eq!(r["id"], "01RUNNINGBACKUP");
+    let n: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM backups WHERE state='running'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn no_audio_is_made_for_a_book_scheduled_for_deletion() {
+    let f = Fx::new().await;
+    let dp = format!("/api/books/{}/deletion", f.book);
+    f.s.post(DEL, &dp, json!({}), 202).await;
+    let e =
+        f.s.post(
+            "/api/audiobooks/{audiobook_id}/make-ready",
+            &format!("/api/audiobooks/{}/make-ready", f.audiobook),
+            json!({ "scope": { "kind": "whole_book" } }),
+            409,
+        )
+        .await;
+    assert_eq!(e["code"], "deletion_pending", "{e}");
+    let e =
+        f.s.call(
+            Method::POST,
+            "/api/audiobooks/{audiobook_id}/chapters/{chapter_id}/request",
+            &format!(
+                "/api/audiobooks/{}/chapters/{}/request",
+                f.audiobook, f.chapters[0]
+            ),
+            Some(DEVICE),
+            Some(json!({ "ahead": 0 })),
+            409,
+        )
+        .await;
+    assert_eq!(e["code"], "deletion_pending", "{e}");
+    // after the undo it works again
+    f.s.delete(DEL, &dp, 204).await;
+    f.make_all().await;
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn audio_folders_that_belong_to_no_audiobook_are_swept_and_real_ones_kept() {
+    let f = Fx::new().await;
+    f.make_all().await;
+    let real = f.s.dir.path().join("audio").join(&f.audiobook);
+    let orphan = f.s.dir.path().join("audio").join("01ORPHANAUDIOBOOK");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("01CHAPTER.part"), b"left behind").unwrap();
+    let before = std::fs::read_dir(&real).unwrap().count();
+    assert!(before > 0);
+    let dir = f.s.stop().await;
+    // a restart sweeps
+    let s = TestServer::start_in(dir).await;
+    for _ in 0..100 {
+        if !orphan.exists() {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+    }
+    assert!(!orphan.exists(), "the orphan folder is still there");
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), before);
     s.stop().await;
 }

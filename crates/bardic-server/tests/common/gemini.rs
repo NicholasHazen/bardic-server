@@ -25,6 +25,12 @@ pub struct Fake {
     pub no_usage: u32,
     /// Next responses: success with usage but no audio.
     pub no_audio: u32,
+    /// Answer the next speech requests with these statuses (an empty JSON error body).
+    pub statuses: Vec<u16>,
+    /// Next responses: 200 with a body that is not JSON.
+    pub garbage: u32,
+    /// Next responses: 200 with audio that is not valid base64.
+    pub bad_audio: u32,
     /// Audio tokens billed per spoken character (a voice speaks about 1.8).
     pub out_tokens_per_char: f64,
 }
@@ -63,6 +69,28 @@ async fn interactions(State(f): State<Shared>, h: HeaderMap, Json(body): Json<Va
         .as_str()
         .unwrap_or("")
         .to_string();
+    let (status, garbage, bad_audio) = {
+        let mut f = f.lock().unwrap();
+        let s = (!f.statuses.is_empty()).then(|| f.statuses.remove(0));
+        let g = s.is_none() && f.garbage > 0;
+        let b = s.is_none() && !g && f.bad_audio > 0;
+        f.garbage -= g as u32;
+        f.bad_audio -= b as u32;
+        (s, g, b)
+    };
+    if let Some(s) = status {
+        return (
+            StatusCode::from_u16(s).unwrap(),
+            Json(json!({ "error": { "message": "refused by the fake" } })),
+        )
+            .into_response();
+    }
+    if garbage {
+        return (StatusCode::OK, "<html>not json</html>").into_response();
+    }
+    if bad_audio {
+        return Json(json!({ "steps": [{ "type": "model_output", "content": [{ "type": "audio", "mime_type": "audio/L16;codec=pcm;rate=24000", "data": "***not base64***" }] }] })).into_response();
+    }
     let (quota, no_usage, no_audio, per_char) = {
         let mut f = f.lock().unwrap();
         let q = if f.quota.is_empty() {
@@ -92,10 +120,11 @@ async fn interactions(State(f): State<Shared>, h: HeaderMap, Json(body): Json<Va
     let chars = text.chars().count();
     let pcm = vec![1u8; chars * 10 * 48];
     let usage = json!({
-        "total_input_tokens": (chars as f64 / 4.0).ceil() as i64,
+        "total_input_tokens": (chars as f64 / 4.0).ceil() as i64 + 201,
         "total_output_tokens": (chars as f64 * per_char).round() as i64,
         "total_cached_tokens": 0,
-        "input_tokens_by_modality": [{ "modality": "text", "tokens": (chars as f64 / 4.0).ceil() as i64 }],
+        // the live API also reports about 200 audio input tokens on every request (not billed)
+        "input_tokens_by_modality": [{ "modality": "audio", "tokens": 201 }, { "modality": "text", "tokens": (chars as f64 / 4.0).ceil() as i64 }],
         "output_tokens_by_modality": [{ "modality": "audio", "tokens": (chars as f64 * per_char).round() as i64 }],
     });
     let mut out = json!({ "steps": [] });

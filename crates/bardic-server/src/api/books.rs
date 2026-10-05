@@ -34,6 +34,7 @@ fn cover_value(
     w: Option<i64>,
     h: Option<i64>,
     sample: Option<String>,
+    generated: bool,
 ) -> Value {
     match (sha, w, h) {
         (Some(sha), Some(w), Some(h)) => json!({
@@ -42,6 +43,7 @@ fn cover_value(
             "width": w,
             "height": h,
             "sample": sample.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+            "generated": generated,
         }),
         _ => Value::Null,
     }
@@ -51,7 +53,7 @@ fn cover_value(
 pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Result<Value, ApiError> {
     let row = conn
         .query_row(
-            "SELECT id,title,author,state,added_at,series_name,series_order,source_sha256,word_count,chapter_count,cover_sha256,cover_width,cover_height,cover_sample FROM books WHERE id=?1",
+            "SELECT id,title,author,state,added_at,series_name,series_order,source_sha256,word_count,chapter_count,story_chapter_count,cover_sha256,cover_width,cover_height,cover_sample,cover_generated FROM books WHERE id=?1",
             [id],
             |r| {
                 Ok((
@@ -65,10 +67,12 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, i64>(8)?,
                     r.get::<_, i64>(9)?,
-                    r.get::<_, Option<String>>(10)?,
-                    r.get::<_, Option<i64>>(11)?,
+                    r.get::<_, i64>(10)?,
+                    r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<i64>>(12)?,
-                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, Option<i64>>(13)?,
+                    r.get::<_, Option<String>>(14)?,
+                    r.get::<_, i64>(15)? != 0,
                 ))
             },
         )
@@ -84,10 +88,12 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
         sha,
         words,
         chapters,
+        story_chapters,
         csha,
         cw,
         ch,
         csample,
+        cgen,
     )) = row
     else {
         return Err(book_not_found());
@@ -111,8 +117,9 @@ pub fn book_value(conn: &Connection, id: &str, viewer: Option<&Viewer>) -> Resul
         "state": state,
         "added_at": added_at,
         "series": sname.map(|n| json!({ "name": n, "order": sorder })),
-        "cover": cover_value(&id, csha, cw, ch, csample),
+        "cover": cover_value(&id, csha, cw, ch, csample, cgen),
         "chapter_count": chapters,
+        "story_chapter_count": story_chapters,
         "word_count": words,
         "source_sha256": sha,
         "place": place,
@@ -129,6 +136,15 @@ pub fn store_parsed(
     parsed: &ParsedBook,
     thumb: Option<&Thumbnail>,
 ) -> Result<(), ApiError> {
+    // A book without a cover gets a generated one (drawn before the transaction opens).
+    let made;
+    let (thumb, generated) = match thumb {
+        Some(t) => (t, false),
+        None => {
+            made = crate::cover::generated(&parsed.title, &parsed.author);
+            (&made, true)
+        }
+    };
     let tx = conn.transaction()?;
     let (mut story_words, mut story_chapters) = (0i64, 0i64);
     for (idx, ch) in parsed.chapters.iter().enumerate() {
@@ -155,22 +171,47 @@ pub fn store_parsed(
             )?;
         }
     }
-    let (csha, cw, ch, cjpeg, csample) = match thumb {
-        Some(t) => (
-            Some(t.sha256.clone()),
-            Some(t.width as i64),
-            Some(t.height as i64),
-            Some(t.jpeg.clone()),
-            Some(serde_json::to_string(&t.sample).expect("sample serializes")),
-        ),
-        None => (None, None, None, None, None),
-    };
     tx.execute(
-        "UPDATE books SET title=?2, author=?3, state='readable', word_count=?4, chapter_count=?5, cover_sha256=?6, cover_width=?7, cover_height=?8, cover_jpeg=?9, cover_sample=?10 WHERE id=?1",
-        params![book_id, parsed.title, parsed.author, story_words, story_chapters, csha, cw, ch, cjpeg, csample],
+        "UPDATE books SET title=?2, author=?3, state='readable', word_count=?4, chapter_count=?5, story_chapter_count=?6, cover_sha256=?7, cover_width=?8, cover_height=?9, cover_jpeg=?10, cover_sample=?11, cover_generated=?12 WHERE id=?1",
+        params![
+            book_id,
+            parsed.title,
+            parsed.author,
+            story_words,
+            parsed.chapters.len() as i64,
+            story_chapters,
+            thumb.sha256,
+            thumb.width as i64,
+            thumb.height as i64,
+            thumb.jpeg,
+            serde_json::to_string(&thumb.sample).expect("sample serializes"),
+            generated
+        ],
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Give every book that has no cover a generated one. Runs at start-up. One transaction, so a crash
+/// leaves either all of them or none; idempotent, because it only touches books with no cover image.
+pub fn backfill_generated_covers(conn: &mut Connection) -> rusqlite::Result<usize> {
+    let missing: Vec<(String, String, String)> = conn
+        .prepare("SELECT id,title,author FROM books WHERE cover_jpeg IS NULL AND state IN ('readable','removed')")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    for (id, title, author) in &missing {
+        let t = crate::cover::generated(title, author);
+        tx.execute(
+            "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6,cover_generated=1 WHERE id=?1 AND cover_jpeg IS NULL",
+            params![id, t.sha256, t.width as i64, t.height as i64, t.jpeg, serde_json::to_string(&t.sample).expect("sample serializes")],
+        )?;
+    }
+    tx.commit()?;
+    Ok(missing.len())
 }
 
 // ------------------------------------------------------------------ list
@@ -327,10 +368,7 @@ pub struct DupQuery {
 }
 
 fn norm(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+    crate::cover::normalise(s)
 }
 
 /// `findDuplicateBooks`: informs; never blocks an import.
@@ -687,26 +725,158 @@ fn book_exists(conn: &Connection, id: &str) -> Result<(), ApiError> {
 }
 
 /// `listChapters`
+#[derive(Deserialize)]
+pub struct ChaptersQuery {
+    include_matter: Option<bool>,
+}
+
+fn chapter_values(conn: &Connection, id: &str, include_matter: bool) -> Result<Value, ApiError> {
+    let items: Vec<Value> = conn
+        .prepare("SELECT id,idx,title,kind,word_count,text_sha256 FROM chapters WHERE book_id=?1 AND (?2 OR kind='story') ORDER BY idx")?
+        .query_map(params![id, include_matter], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?, "index": r.get::<_, i64>(1)?, "title": r.get::<_, String>(2)?,
+                "kind": r.get::<_, String>(3)?, "word_count": r.get::<_, i64>(4)?, "text_sha256": r.get::<_, String>(5)?,
+            }))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(json!({ "items": items }))
+}
+
+/// `listChapters`: hiding matter preserves chapter identities and reading indices.
 pub async fn chapters(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<ChaptersQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let out = state
         .store
         .run(move |c| {
             book_exists(c, &id)?;
-            let items: Vec<Value> = c
-                .prepare("SELECT id,idx,title,kind,word_count,text_sha256 FROM chapters WHERE book_id=?1 ORDER BY idx")?
-                .query_map([&id], |r| {
-                    Ok(json!({
-                        "id": r.get::<_, String>(0)?, "index": r.get::<_, i64>(1)?, "title": r.get::<_, String>(2)?,
-                        "kind": r.get::<_, String>(3)?, "word_count": r.get::<_, i64>(4)?, "text_sha256": r.get::<_, String>(5)?,
-                    }))
-                })?
-                .collect::<Result<_, _>>()?;
-            Ok(json!({ "items": items }))
+            chapter_values(c, &id, q.include_matter.unwrap_or(true))
         })
         .await?;
+    Ok(Json(out))
+}
+
+fn source_unavailable() -> ApiError {
+    ApiError::conflict(
+        "source_unavailable",
+        "The saved original cannot be read. Chapter metadata was kept.",
+    )
+}
+
+/// `refreshBookChapters`: repair metadata only after verifying the entire stored text.
+pub async fn refresh_chapters(
+    State(state): State<AppState>,
+    device: DeviceCtx,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let lookup = id.clone();
+    let (ext, name): (Option<String>, Option<String>) = state
+        .store
+        .run(move |c| {
+            require_editable(c, &lookup)?;
+            Ok(c.query_row(
+                "SELECT source_ext,source_name FROM books WHERE id=?1",
+                [&lookup],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await?;
+
+    // Reading and parsing can be slow. Both happen outside the store lock; the
+    // book's state is checked again in the transaction before any change.
+    let parsed = async {
+        let (Some(ext), Some(name)) = (ext, name) else {
+            return Err(source_unavailable());
+        };
+        if !matches!(ext.as_str(), "epub" | "txt") {
+            return Err(source_unavailable());
+        }
+        let path = state
+            .store
+            .data_dir()
+            .join("originals")
+            .join(&id)
+            .join(format!("source.{ext}"));
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|_| source_unavailable())?;
+        tokio::task::spawn_blocking(move || crate::importer::parse(&name, &bytes))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(|_| source_unavailable())
+    }
+    .await;
+
+    let target = id.clone();
+    let (audit_id, at, actor) = (state.new_id(), state.now(), Actor::device_only(&device));
+    let (out, changed) = state
+        .store
+        .run(move |c| {
+            let tx = c.transaction()?;
+            require_editable(&tx, &target)?;
+            let parsed = parsed?;
+            // Ordered, byte-for-byte comparison of every chapter must finish
+            // before any metadata is changed. Chapter and line identities are
+            // never rebuilt, so existing audio, places and plans remain valid.
+            type StoredChapter = (String, String, String, String, i64);
+            let stored: Vec<StoredChapter> = tx
+                .prepare("SELECT id,title,kind,text,word_count FROM chapters WHERE book_id=?1 ORDER BY idx")?
+                .query_map([&target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<Result<_, _>>()?;
+            if stored.len() != parsed.chapters.len()
+                || stored.iter().zip(&parsed.chapters).any(|(old, new)| old.3 != new.text)
+            {
+                return Err(ApiError::conflict(
+                    "chapter_structure_changed",
+                    "The saved original's chapters differ from the stored text. Chapter metadata was kept.",
+                ));
+            }
+            let (mut story_words, mut story_chapters) = (0i64, 0i64);
+            let mut changed = false;
+            for (old, new) in stored.iter().zip(&parsed.chapters) {
+                if new.kind == "story" {
+                    story_words += old.4;
+                    story_chapters += 1;
+                }
+                changed |= old.1 != new.title || old.2 != new.kind;
+            }
+            let counts: (i64, i64) = tx.query_row(
+                "SELECT word_count,story_chapter_count FROM books WHERE id=?1",
+                [&target],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            changed |= counts != (story_words, story_chapters);
+            if changed {
+                for (old, new) in stored.iter().zip(&parsed.chapters) {
+                    tx.execute(
+                        "UPDATE chapters SET title=?2,kind=?3 WHERE id=?1",
+                        params![old.0, new.title, new.kind],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE books SET word_count=?2,story_chapter_count=?3 WHERE id=?1",
+                    params![target, story_words, story_chapters],
+                )?;
+                audit::record(
+                    &tx,
+                    &audit_id,
+                    &at,
+                    "book.updated",
+                    &actor,
+                    &json!({ "book_id": target }),
+                )?;
+            }
+            let out = chapter_values(&tx, &target, true)?;
+            tx.commit()?;
+            Ok((out, changed))
+        })
+        .await?;
+    if changed {
+        announce(&state, &id);
+    }
     Ok(Json(out))
 }
 
@@ -761,6 +931,12 @@ pub async fn search(
 ) -> Result<Json<Value>, ApiError> {
     if q.q.is_empty() {
         return Err(ApiError::invalid("invalid_request", "q must not be empty."));
+    }
+    if q.q.chars().count() > 200 {
+        return Err(ApiError::invalid(
+            "invalid_request",
+            "q must be at most 200 characters.",
+        ));
     }
     let limit = super::audit::page_limit(q.limit)?;
     let skip = offset_cursor(&q.after)?;
@@ -851,7 +1027,8 @@ pub async fn cover(
     Ok(resp)
 }
 
-/// `refreshBookCover`: re-read the cover from the saved original, if there is one.
+/// `refreshBookCover`: re-read a real cover from the saved original, if there is one; a generated
+/// cover is drawn again from the current title and author. A generated cover never replaces a real one.
 pub async fn refresh_cover(
     State(state): State<AppState>,
     _device: DeviceCtx,
@@ -864,18 +1041,51 @@ pub async fn refresh_cover(
     });
     let data_dir = state.store.data_dir().to_path_buf();
     let lookup = id.clone();
-    let (ext, name): (Option<String>, Option<String>) = state
+    let (ext, name, generated, title, author): (
+        Option<String>,
+        Option<String>,
+        bool,
+        String,
+        String,
+    ) = state
         .store
         .run(move |c| {
             book_exists(c, &lookup)?;
             Ok(c.query_row(
-                "SELECT source_ext,source_name FROM books WHERE id=?1",
+                "SELECT source_ext,source_name,cover_generated,title,author FROM books WHERE id=?1",
                 [&lookup],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, i64>(2)? != 0,
+                        r.get(3)?,
+                        r.get(4)?,
+                    ))
+                },
             )?)
         })
         .await?;
-    if let (Some(ext), Some(name)) = (ext, name) {
+    if generated {
+        let t = tokio::task::spawn_blocking(move || crate::cover::generated(&title, &author))
+            .await
+            .map_err(ApiError::internal)?;
+        let target = id.clone();
+        let changed = state
+            .store
+            .run(move |c| {
+                // Only while the cover is still a generated one: a real cover is never replaced.
+                let n = c.execute(
+                    "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6 WHERE id=?1 AND cover_generated=1 AND cover_sha256 IS NOT ?2",
+                    params![target, t.sha256, t.width as i64, t.height as i64, t.jpeg, serde_json::to_string(&t.sample).expect("sample")],
+                )?;
+                Ok(n > 0)
+            })
+            .await?;
+        if changed {
+            announce(&state, &id);
+        }
+    } else if let (Some(ext), Some(name)) = (ext, name) {
         let path = data_dir
             .join("originals")
             .join(&id)
@@ -895,7 +1105,7 @@ pub async fn refresh_cover(
                     .store
                     .run(move |c| {
                         c.execute(
-                            "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6 WHERE id=?1",
+                            "UPDATE books SET cover_sha256=?2,cover_width=?3,cover_height=?4,cover_jpeg=?5,cover_sample=?6,cover_generated=0 WHERE id=?1",
                             params![target, t.sha256, t.width as i64, t.height as i64, t.jpeg, serde_json::to_string(&t.sample).expect("sample")],
                         )?;
                         Ok(())

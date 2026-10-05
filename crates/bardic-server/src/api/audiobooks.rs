@@ -6,6 +6,7 @@ use crate::{
     app::{Actor, AppState, DeviceCtx},
     error::ApiError,
     events::Notice,
+    maintenance::AudioScope,
 };
 use axum::{
     extract::{Path, State},
@@ -70,7 +71,7 @@ pub async fn list(
 ) -> Result<Json<Value>, ApiError> {
     let v = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Book(book.clone()), state.now(), move |c| {
             book_state(c, &book)?;
             let ids: Vec<String> = c
                 .prepare("SELECT id FROM audiobooks WHERE book_id=?1 ORDER BY created_at, id")?
@@ -108,7 +109,7 @@ pub async fn create(
     let b = book.clone();
     let (created, v) = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Book(book.clone()), at.clone(), move |c| {
             let tx = c.transaction()?;
             if book_state(&tx, &b)? == "removed" {
                 return Err(ApiError::conflict("book_removed", "Restore this book before making an audiobook of it."));
@@ -169,7 +170,12 @@ pub async fn get_one(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
-        state.store.run(move |c| audiobook_value(c, &id)).await?,
+        state
+            .store
+            .run_audio(AudioScope::Audiobook(id.clone()), state.now(), move |c| {
+                audiobook_value(c, &id)
+            })
+            .await?,
     ))
 }
 
@@ -195,7 +201,14 @@ pub async fn chapters(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let v = state.store.run(move |c| chapter_states(c, &id)).await?;
+    let v = state
+        .store
+        .run_audio(
+            AudioScope::BookOfAudiobook(id.clone()),
+            state.now(),
+            move |c| chapter_states(c, &id),
+        )
+        .await?;
     Ok(Json(v))
 }
 

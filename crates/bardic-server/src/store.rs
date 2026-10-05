@@ -17,6 +17,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0007_money.sql"),
     include_str!("../migrations/0008_plans.sql"),
     include_str!("../migrations/0009_space_deletion_backup.sql"),
+    include_str!("../migrations/0010_gemini_price_measured.sql"),
+    include_str!("../migrations/0011_generated_covers.sql"),
 ];
 
 /// Schema version a fresh or fully migrated database ends at.
@@ -45,6 +47,13 @@ pub struct Store {
 impl Store {
     pub fn open(data_dir: &Path) -> Result<Store, StoreError> {
         std::fs::create_dir_all(data_dir)?;
+        // The database holds API keys, and backups and exports hold the owner's books: other
+        // accounts on this computer have no business in the folder.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         let mut conn = Connection::open(data_dir.join("bardic.db"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -59,6 +68,42 @@ impl Store {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Recover Ready-file availability before requests or the worker can observe it.
+    pub fn reconcile_audio_startup(&self, at: &str) -> Result<usize, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| std::io::Error::other("database lock poisoned"))?;
+        crate::maintenance::reconcile_audio(
+            &conn,
+            &self.data_dir,
+            &crate::maintenance::AudioScope::All,
+            at,
+        )
+    }
+
+    /// Check only relevant immutable files, then perform the short database operation under
+    /// the same connection lock. The invalidation commits before `f`, even if `f` returns a
+    /// conflict (a missing premium chapter must not stay Ready after plan_required).
+    pub async fn run_audio<T, F>(
+        &self,
+        scope: crate::maintenance::AudioScope,
+        at: String,
+        f: F,
+    ) -> Result<T, ApiError>
+    where
+        F: FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let data_dir = self.data_dir.clone();
+        self.run(move |c| {
+            crate::maintenance::reconcile_audio(c, &data_dir, &scope, &at)
+                .map_err(ApiError::internal)?;
+            f(c)
+        })
+        .await
     }
 
     /// Run a short database job on the blocking pool.

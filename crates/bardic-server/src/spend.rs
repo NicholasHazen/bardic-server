@@ -2,11 +2,12 @@
 //! highest likely cost, and settled when it ends. Limits are checked against
 //! what is known plus what is reserved, so a request that could pass a limit is
 //! never sent. A request whose cost cannot be stated is recorded as unknown,
-//! never as zero.
+//! never as zero. For limits only, an unknown request is still held at the amount that was
+//! reserved for it: it may have been billed, so it must not make room for more spending.
 
 use crate::{api::money, error::ApiError};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Debug, PartialEq)]
 pub enum Denied {
@@ -14,12 +15,14 @@ pub enum Denied {
     Plan,
     /// The monthly Allowance.
     Allowance,
+    /// The plan's job was stopped (or has failed) while this request was being prepared.
+    Stopped,
 }
 
-/// Known plus reserved money of a plan.
+/// Known, reserved and unknown (held at its reserved amount) money of a plan.
 pub fn plan_used(conn: &Connection, plan_id: &str) -> Result<i64, ApiError> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(CASE WHEN status='known' THEN known_micros WHEN status='reserved' THEN reserved END),0) FROM spend WHERE plan_id=?1",
+        "SELECT COALESCE(SUM(CASE WHEN status='known' THEN known_micros WHEN status IN ('reserved','unknown') THEN reserved END),0) FROM spend WHERE plan_id=?1",
         [plan_id],
         |r| r.get(0),
     )?)
@@ -52,6 +55,8 @@ pub struct Reservation<'a> {
     pub plan: Option<(&'a str, i64)>,
     pub audiobook_id: &'a str,
     pub chapter_id: Option<&'a str>,
+    /// The job this request belongs to; a stopped job cannot reserve.
+    pub job_id: Option<&'a str>,
     pub amount: i64,
     pub now: DateTime<Utc>,
 }
@@ -59,6 +64,17 @@ pub struct Reservation<'a> {
 /// Check the limits and hold the money, atomically. Nothing is held if a limit would be passed.
 pub fn reserve(conn: &mut Connection, r: &Reservation) -> Result<Result<(), Denied>, ApiError> {
     let tx = conn.transaction()?;
+    if let Some(job) = r.job_id {
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job], |x| x.get(0))
+            .optional()?;
+        if !matches!(
+            state.as_deref(),
+            Some("queued" | "running" | "waiting" | "paused")
+        ) {
+            return Ok(Err(Denied::Stopped));
+        }
+    }
     if let Err(d) = check(&tx, r.plan, r.amount, r.now)? {
         return Ok(Err(d));
     }
@@ -79,7 +95,9 @@ pub enum Outcome {
         output: Option<i64>,
     },
     /// Possibly billed, cost not stated.
-    Unknown { note: &'static str },
+    Unknown {
+        note: std::borrow::Cow<'static, str>,
+    },
     /// Not billed: the request was refused, rate-limited or never sent.
     Nothing,
 }

@@ -2,7 +2,7 @@
 
 The server half of Bardic v2: it turns books you own into audiobooks on your own computer. It stores books and text, talks to voice sources (Breeze, Gemini, voices on this computer), makes and keeps audio, runs plans with limits, and keeps each listener's place. Clients (see the `bardic-web` repository) talk to it over the HTTP contract in this repository.
 
-**Status: M0 to M2 done; M3 (free audio), M4 (Gemini voices, prices, plans, Allowance, paid audio) and M5 (offline manifests, freeing space, deletion with undo, export, backup) done. Every operation in the contract is implemented; M6 is hardening.** Implemented and tested against the contract: server, devices, audit, events, listeners and settings, the library (import EPUB and text, duplicates, sample book, series, chapters and text, cover and colour sample, search, edit, remove and restore) and places (revisions, conflicts, history, finished). Audio, voices, plans and offline are still to do (see the roadmap). Try it with [docs/CURL.md](docs/CURL.md).
+**Status: M0–M7 implemented; contract 0.5.1 adds chapter metadata refresh and matter selection.** Every operation in the contract is implemented, including free and premium audio, plans and Allowance, offline manifests, space management, deletion with Undo, export and backup. Foreign browser sample requests are refused before spending, concurrent samples share one provider request, and missing Ready files become unavailable without automatic paid repair. See the roadmap for verification and remaining limits. Try it with [docs/CURL.md](docs/CURL.md).
 
 ## Start here
 
@@ -32,9 +32,17 @@ docs/                   spec, contract, architecture, roadmap
 cargo run -p bardic-server -- --data-dir ./data     # http://127.0.0.1:8765
 #   --bind 0.0.0.0:8765          listen on the network (trusted networks only)
 #   --allow-origin http://localhost:5173   let a dev web page call the API
+#   --allow-host bardic.example.org        a public DNS name this server may be reached by
+#                                          (IPs, localhost, single-word and .local/.lan/.ts.net names always work)
 cargo test                                          # includes contract conformance
 cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
+
+## Container deployment
+
+The root Dockerfile builds a non-root Linux server image with ffmpeg and a persistent `/data` directory. The web repository owns the two-service Compose stack and [deployment guide](../bardic-web/docs/DEPLOYMENT.md), including host ownership, private HTTPS, backups and restores. Run one server per local data directory. SIGTERM and SIGINT both drain the server before releasing its lock; Compose allows five minutes for admitted samples to settle. The API contract is 0.5.1.
+
+`docker build --target verify .` runs formatting, Clippy and the complete offline test suite, including contract and shutdown-signal tests. The web repository's Spark updater uses this gate before building and promoting a paired release from both `main` branches. Live provider tests remain ignored. Runtime images keep tests and build tools out of the final image.
 
 ## Principles in one breath
 

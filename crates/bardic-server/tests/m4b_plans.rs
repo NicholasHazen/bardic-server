@@ -206,10 +206,10 @@ async fn a_preview_is_a_dated_range_and_spends_nothing() {
     assert!(0 < low && low < likely && likely < high);
     assert_eq!(
         likely,
-        (est["text_characters"].as_i64().unwrap() * 16_300_000 + 999_999) / 1_000_000
+        (est["text_characters"].as_i64().unwrap() * 25_000_000 + 999_999) / 1_000_000
     );
     assert_eq!(est["cost"]["basis"], "manual");
-    assert_eq!(est["cost"]["prices_as_of"], "2026-09-27T00:00:00.000Z");
+    assert_eq!(est["cost"]["prices_as_of"], "2026-09-30T00:00:00.000Z");
     assert!(micros(&est["suggested_limit"]) >= high);
     assert_eq!(est["expires_at"], "2026-01-15T12:15:00.000Z");
     assert_eq!(
@@ -349,7 +349,7 @@ async fn an_approval_must_match_what_was_shown() {
     f.s.put(
         "/api/prices/{provider}",
         "/api/prices/gemini",
-        json!({ "unit": "million_characters", "per_unit": money(16_300_000) }),
+        json!({ "unit": "million_characters", "per_unit": money(25_000_000) }),
         200,
     )
     .await;
@@ -658,15 +658,25 @@ async fn a_premium_sample_is_a_counted_request_made_once_per_revision() {
             .to_string();
     let path = format!("/api/voices/{voice}/sample");
     let (h, a) =
-        f.s.raw("/api/voices/{voice_id}/sample", &path, &[], 200)
-            .await;
+        f.s.raw(
+            "/api/voices/{voice_id}/sample",
+            &path,
+            &[("x-bardic-device", DEVICE)],
+            200,
+        )
+        .await;
     assert_eq!(&a[..4], b"RIFF");
     assert_eq!(h["content-type"], "audio/wav");
     let spent = micros(&f.allowance().await["spent"]["known"]);
     assert!(spent > 0, "a premium sample is counted");
     assert_eq!(f.g.received(), 1);
-    f.s.raw("/api/voices/{voice_id}/sample", &path, &[], 200)
-        .await;
+    f.s.raw(
+        "/api/voices/{voice_id}/sample",
+        &path,
+        &[("x-bardic-device", DEVICE)],
+        200,
+    )
+    .await;
     assert_eq!(f.g.received(), 1, "the repeat is free");
     assert_eq!(micros(&f.allowance().await["spent"]["known"]), spent);
 
@@ -688,7 +698,7 @@ async fn a_premium_sample_is_a_counted_request_made_once_per_revision() {
         f.s.raw(
             "/api/voices/{voice_id}/sample",
             &format!("/api/voices/{other}/sample"),
-            &[],
+            &[("x-bardic-device", DEVICE)],
             409,
         )
         .await;
@@ -730,4 +740,388 @@ async fn a_request_in_flight_when_the_server_stops_becomes_unknown_spend_and_the
     assert_eq!(f.ready().await, 3);
     assert_eq!(f.allowance().await["spent"]["unknown_items"], 1);
     f.s.stop().await;
+}
+
+/// A provider failing in ways other than a quota: what it costs and what happens next.
+async fn one_chapter_plan(f: &Fx) -> String {
+    let est = f
+        .preview(
+            json!({ "kind": "chapters", "chapter_ids": [f.chapters[0]] }),
+            200,
+        )
+        .await;
+    let plan = f.approve(&est, micros(&est["suggested_limit"]), 201).await;
+    plan["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn a_content_refusal_costs_nothing_and_fails_only_that_chapter() {
+    let f = Fx::new().await;
+    f.g.state.lock().unwrap().statuses = vec![400];
+    let id = one_chapter_plan(&f).await;
+    let stuck = f.wait(&id, &["needs_you"]).await;
+    assert_eq!(stuck["needs_you"]["code"], "provider_refused", "{stuck}");
+    assert_eq!(micros(&stuck["spent"]["known"]), 0);
+    assert_eq!(stuck["spent"]["unknown_items"], 0, "a 400 is not billed");
+    assert_eq!(f.ready().await, 0);
+    assert!(
+        !stuck.to_string().contains("refused by the fake"),
+        "the provider's own text is never passed on"
+    );
+    f.act(&id, "resume", json!({}), 200).await;
+    let done = f.wait(&id, &["completed"]).await;
+    assert_eq!(done["spent"]["unknown_items"], 0);
+    assert_eq!(f.ready().await, 1);
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn provider_server_errors_and_garbage_are_unknown_spend_and_never_retried_by_themselves() {
+    for fault in ["500", "503", "garbage", "bad_audio"] {
+        let f = Fx::new().await;
+        {
+            let mut g = f.g.state.lock().unwrap();
+            match fault {
+                "500" => g.statuses = vec![500],
+                "503" => g.statuses = vec![503],
+                "garbage" => g.garbage = 1,
+                _ => g.bad_audio = 1,
+            }
+        }
+        let id = one_chapter_plan(&f).await;
+        let stuck = f.wait(&id, &["needs_you"]).await;
+        assert_eq!(stuck["spent"]["unknown_items"], 1, "{fault}: {stuck}");
+        assert_eq!(micros(&stuck["spent"]["known"]), 0, "{fault}");
+        // it was sent once: no hidden second attempt that would spend again
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        assert_eq!(f.g.state.lock().unwrap().received, 1, "{fault}");
+        assert_eq!(f.ready().await, 0, "{fault}");
+        assert_eq!(f.allowance().await["spent"]["unknown_items"], 1, "{fault}");
+        // the listener may choose to try again
+        f.act(&id, "resume", json!({}), 200).await;
+        let done = f.wait(&id, &["completed"]).await;
+        assert_eq!(done["spent"]["unknown_items"], 1, "{fault}");
+        assert_eq!(f.ready().await, 1, "{fault}");
+        f.s.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_plan_halts_the_chapter_at_the_next_request_not_the_end_of_it() {
+    let g = FakeGemini::start("k").await;
+    // small requests, so every chapter is many of them
+    let s = TestServer::start_with(tempfile::tempdir().unwrap(), |c| {
+        c.audio_chunk_chars = 40;
+        c.job_retry_ms = 20;
+        c.gemini_url = g.url.clone();
+    })
+    .await;
+    let f = Fx::on(s, g).await;
+    f.g.state.lock().unwrap().delay_ms = 80;
+    let id = one_chapter_plan(&f).await;
+    for _ in 0..200 {
+        if f.g.received() >= 2 {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+    let at_stop = f.g.received();
+    assert!(at_stop >= 2);
+    f.act(&id, "stop", json!({}), 200).await;
+    tokio::time::sleep(StdDuration::from_millis(1500)).await;
+    let total_requests = f.g.received();
+    assert!(
+        total_requests <= at_stop + 1,
+        "{total_requests} requests after a stop at {at_stop}: only the one in flight may finish"
+    );
+    let chapter_chars = f.chars[0];
+    assert!(
+        (total_requests as i64) * 40 < chapter_chars,
+        "the whole chapter was made after the stop"
+    );
+    // what was paid for is a known cost, and nothing is left reserved
+    let st = f.plan(&id).await;
+    assert_eq!(st["state"], "stopped");
+    assert_eq!(st["spent"]["unknown_items"], 0);
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn an_unknown_cost_still_uses_up_the_limit_so_resuming_cannot_spend_it_twice() {
+    let f = Fx::new().await;
+    f.g.state.lock().unwrap().statuses = vec![500];
+    let est = f
+        .preview(
+            json!({ "kind": "chapters", "chapter_ids": [f.chapters[0]] }),
+            200,
+        )
+        .await;
+    // room for the chapter once, not twice
+    let limit = micros(&est["cost"]["high"]) * 12 / 10;
+    let plan = f.approve(&est, limit, 201).await;
+    let id = plan["id"].as_str().unwrap().to_string();
+    let stuck = f.wait(&id, &["needs_you"]).await;
+    assert_eq!(stuck["spent"]["unknown_items"], 1, "{stuck}");
+    let sent = f.g.received();
+    assert_eq!(sent, 1, "the first request must have been sent");
+    f.act(&id, "resume", json!({}), 200).await;
+    let again = f.wait(&id, &["needs_you"]).await;
+    assert_eq!(
+        f.g.received(),
+        sent,
+        "a request that may already have been billed must not make room to send it again: {again}"
+    );
+    assert_eq!(again["needs_you"]["code"], "limit_exceeded", "{again}");
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn a_plan_cannot_be_resumed_into_a_book_that_is_about_to_be_deleted() {
+    let f = Fx::new().await;
+    f.g.state.lock().unwrap().statuses = vec![500];
+    let id = one_chapter_plan(&f).await;
+    f.wait(&id, &["needs_you"]).await;
+    let dp = format!("/api/books/{}/deletion", f.book);
+    f.s.post("/api/books/{book_id}/deletion", &dp, json!({}), 202)
+        .await;
+    let sent = f.g.received();
+    let e = f.act(&id, "resume", json!({}), 409).await;
+    assert_eq!(e["code"], "deletion_pending", "{e}");
+    assert_eq!(f.g.received(), sent);
+    // after the undo it can go on
+    f.s.delete("/api/books/{book_id}/deletion", &dp, 204).await;
+    f.act(&id, "resume", json!({}), 200).await;
+    f.wait(&id, &["completed"]).await;
+    f.s.stop().await;
+}
+
+/// A seeded soak: a whole-book plan with small requests, random provider faults and restarts
+/// at random moments. Whatever happens, the ledger accounts for every request, nothing is left
+/// reserved, spending stays inside the limit, and every chapter marked ready has its file.
+#[tokio::test]
+async fn a_soak_of_faults_and_restarts_keeps_the_ledger_and_the_audio_honest() {
+    let (mut all_restarts, mut all_unknown) = (0u64, 0i64);
+    for seed in 1..=4u64 {
+        let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut dir = tempfile::tempdir().unwrap();
+        let g = FakeGemini::start("k").await;
+        let mk = |g: &FakeGemini| {
+            let url = g.url.clone();
+            move |c: &mut bardic_server::config::Config| {
+                c.audio_chunk_chars = 120;
+                c.job_retry_ms = 10;
+                c.gemini_url = url;
+            }
+        };
+        let s = TestServer::start_with(dir, mk(&g)).await;
+        let mut f = Fx::on(s, g).await;
+        f.g.state.lock().unwrap().delay_ms = 20;
+        // two 5xx or garbage faults, one content refusal, one answer without audio, one 429
+        {
+            let mut st = f.g.state.lock().unwrap();
+            for _ in 0..2 {
+                match next(3) {
+                    0 => st.statuses.push(500),
+                    1 => st.garbage += 1,
+                    _ => st.bad_audio += 1,
+                }
+            }
+            st.statuses.push(400);
+            st.no_audio = 1;
+            st.quota = vec![1];
+        }
+        let est = f.whole().await;
+        let limit = micros(&est["cost"]["high"]) * 3;
+        let plan = f.approve(&est, limit, 201).await;
+        let id = plan["id"].as_str().unwrap().to_string();
+
+        let mut restarts = 0u64;
+        for round in 0..40 {
+            tokio::time::sleep(StdDuration::from_millis(60 + next(200))).await;
+            let p = f.plan(&id).await;
+            match p["state"].as_str().unwrap() {
+                "completed" => break,
+                "needs_you" | "paused" => {
+                    f.act(&id, "resume", json!({}), 200).await;
+                }
+                // the quota's wait is on the fake clock
+                "waiting" => f.s.clock.advance(Duration::seconds(2)),
+                _ => {}
+            }
+            if round % 3 == 1 && next(2) == 0 && restarts < 3 {
+                restarts += 1;
+                let (g, book, audiobook, chapters, chars) =
+                    (f.g, f.book, f.audiobook, f.chapters, f.chars);
+                dir = f.s.stop().await;
+                let s = TestServer::start_with(dir, mk(&g)).await;
+                let l = s.listener(&format!("Soak{restarts}")).await;
+                s.act_as(&l);
+                f = Fx {
+                    s,
+                    g,
+                    book,
+                    audiobook,
+                    chapters,
+                    chars,
+                };
+            }
+        }
+        let done = f.wait(&id, &["completed"]).await;
+        assert_eq!(f.ready().await, 3, "seed {seed}: {done}");
+        all_restarts += restarts;
+        all_unknown += done["spent"]["unknown_items"].as_i64().unwrap();
+        let known = micros(&done["spent"]["known"]);
+        assert!(known > 0 && known <= limit, "seed {seed}: {done}");
+        let received = f.g.received();
+        let dir = f.s.stop().await;
+
+        let db = rusqlite::Connection::open(dir.path().join("bardic.db")).unwrap();
+        let rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM spend", [], |r| r.get(0))
+            .unwrap();
+        let reserved: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM spend WHERE status='reserved'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reserved, 0, "seed {seed}: a request is still reserved");
+        // a request is reserved before it is sent, so no request goes unrecorded; a restart
+        // can leave a reservation that never reached the provider, never the other way round
+        assert!(
+            rows >= received as i64 && rows <= received as i64 + restarts as i64,
+            "seed {seed}: {rows} ledger rows for {received} requests and {restarts} restarts"
+        );
+        let held: i64 = db
+            .query_row(
+                "SELECT COALESCE(SUM(CASE WHEN status='known' THEN known_micros WHEN status='unknown' THEN reserved END),0) FROM spend",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            held <= limit,
+            "seed {seed}: {held} held against a limit of {limit}"
+        );
+        let mut q = db
+            .prepare("SELECT path, bytes FROM audio WHERE deleted_at IS NULL")
+            .unwrap();
+        let files: Vec<(String, i64)> = q
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(files.len(), 3, "seed {seed}");
+        for (path, bytes) in files {
+            let len = std::fs::metadata(dir.path().join(&path))
+                .unwrap_or_else(|_| panic!("seed {seed}: ready chapter has no file {path}"))
+                .len();
+            assert_eq!(len as i64, bytes, "seed {seed}: {path}");
+        }
+        let stray: Vec<_> = walk(dir.path())
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "part"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "seed {seed}: leftover partial files {stray:?}"
+        );
+    }
+    eprintln!("soak: {all_restarts} restarts, {all_unknown} unknown items over 4 seeds");
+    assert!(
+        all_restarts > 0 && all_unknown > 0,
+        "the soak did not exercise faults"
+    );
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn estimates_double_when_google_doubles_its_rates_unless_the_owner_set_the_price_after() {
+    let f = Fx::new().await;
+    let before = micros(&f.whole().await["cost"]["likely"]);
+    // 2026-01-15 plus 352 days is 2027-01-02
+    f.s.clock.advance(Duration::days(352));
+    let after = f.whole().await;
+    assert_eq!(micros(&after["cost"]["likely"]), before * 2, "{after}");
+    // an approval of an estimate made before the change would be refused as changed; the new one works
+    let space =
+        f.s.get(
+            "/api/audiobooks/{audiobook_id}/space",
+            &format!("/api/audiobooks/{}/space", f.audiobook),
+            200,
+        )
+        .await;
+    assert!(
+        space["remake_estimate"].is_null() || space["remake_estimate"]["likely"]["micros"].is_i64()
+    );
+    // the owner sets the price after the change: taken as meant, not doubled again
+    f.s.put(
+        "/api/prices/{provider}",
+        "/api/prices/gemini",
+        json!({ "unit": "million_characters", "per_unit": money(25_000_000) }),
+        200,
+    )
+    .await;
+    let set = f.whole().await;
+    assert_eq!(micros(&set["cost"]["likely"]), before, "{set}");
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn a_plan_running_after_the_change_holds_back_the_doubled_amount() {
+    let f = Fx::new().await;
+    f.s.clock.advance(Duration::days(352));
+    f.g.state.lock().unwrap().statuses = vec![500];
+    let est = f
+        .preview(
+            json!({ "kind": "chapters", "chapter_ids": [f.chapters[0]] }),
+            200,
+        )
+        .await;
+    let id = f.approve(&est, micros(&est["suggested_limit"]), 201).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stuck = f.wait(&id, &["needs_you"]).await;
+    assert_eq!(stuck["spent"]["unknown_items"], 1);
+    // the unknown request was held at its high estimate at the new rate: more than the old rate
+    let db_dir = f.s.dir.path().join("bardic.db");
+    let db = rusqlite::Connection::open(db_dir).unwrap();
+    let held: i64 = db
+        .query_row(
+            "SELECT reserved FROM spend WHERE status='unknown'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let old_rate_chunk_high = plans_high(f.chars[0].min(400), 25_000_000);
+    assert!(
+        held > old_rate_chunk_high,
+        "held {held} should exceed {old_rate_chunk_high}, the same request at the old rate"
+    );
+    f.s.stop().await;
+}
+
+fn plans_high(chars: i64, per_million: i64) -> i64 {
+    let likely = (chars * per_million + 999_999) / 1_000_000;
+    (likely * 140 + 99) / 100
 }

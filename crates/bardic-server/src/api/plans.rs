@@ -12,7 +12,9 @@ use crate::{
     app::{Actor, AppState, DeviceCtx, ListenerCtx},
     error::ApiError,
     events::Notice,
-    jobs, plans, spend,
+    jobs,
+    maintenance::AudioScope,
+    plans, spend,
 };
 use axum::{
     extract::{Path, State},
@@ -139,6 +141,7 @@ fn quote(
     audiobook: &str,
     book: &str,
     scope: &ScopeIn,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Quote, ApiError> {
     let chosen = resolve_scope(conn, book, scope)?;
     let (mut make, mut reused, mut chars) = (vec![], 0, 0i64);
@@ -159,6 +162,7 @@ fn quote(
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let per_unit = money::effective_gemini_price(per_unit, &as_of, &crate::clock::ts(now));
     Ok(Quote {
         chapter_ids: make,
         reused,
@@ -199,10 +203,10 @@ pub async fn preview(
     let (id, now) = (state.new_id(), state.clock.now());
     let v = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(audiobook.clone()), state.now(), move |c| {
             let tx = c.transaction()?;
             let t = premium_target(&tx, &audiobook)?;
-            let q = quote(&tx, &audiobook, &t.book_id, &input.scope)?;
+            let q = quote(&tx, &audiobook, &t.book_id, &input.scope, now)?;
             let suggested = plans::suggested_limit(q.range.high);
             let left = remaining(&tx, now)?;
             let blocked = match left {
@@ -265,7 +269,7 @@ pub async fn create(
     let actor = Actor::with_listener(&device, &listener);
     let out = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Estimate(input.estimate_id.clone()), state.now(), move |c| {
             let tx = c.transaction()?;
             if let Some(k) = &key {
                 let existing: Option<String> = tx.query_row("SELECT id FROM plans WHERE idempotency_key=?1", [k], |r| r.get(0)).optional()?;
@@ -300,7 +304,7 @@ pub async fn create(
             }
             let scope_json: String = tx.query_row("SELECT scope FROM estimates WHERE id=?1", [&input.estimate_id], |r| r.get(0))?;
             let scope: ScopeIn = serde_json::from_str(&scope_json).map_err(ApiError::internal)?;
-            let now_q = quote(&tx, &audiobook, &t.book_id, &scope)?;
+            let now_q = quote(&tx, &audiobook, &t.book_id, &scope, now)?;
             if now_q.chapter_ids != chapter_ids || now_q.range.likely < low || now_q.range.likely > high {
                 return Err(ApiError::conflict("estimate_changed", "The chapters or the prices changed since this estimate. Preview again."));
             }
@@ -533,6 +537,7 @@ async fn change(
                         return Err(ApiError::conflict(code, "Only a paused plan, or one that needs you, can be resumed."));
                     }
                     let t = target(&tx, &audiobook)?;
+                    super::audio::require_not_deleting(&tx, &t.book_id)?;
                     if t.source_state == "key_rejected" {
                         return Err(ApiError::conflict("key_rejected", "The API key was rejected. Set a working key first."));
                     }

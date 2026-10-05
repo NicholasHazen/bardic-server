@@ -49,6 +49,21 @@ impl MoneyIn {
 }
 
 /// The calendar month (UTC) containing `now`.
+/// Google doubles Gemini speech rates on this date (the first of January 2027, UTC).
+pub const GEMINI_RATE_CHANGE: &str = "2027-01-01T00:00:00.000Z";
+
+/// The per-million-characters price to estimate and reserve with at `now`. The price table is
+/// the owner's, dated by `as_of`; a Gemini price last set before the rate change is doubled
+/// once the change has happened, and one set on or after it is taken as meant. Timestamps are
+/// the server's fixed-width UTC strings, so they compare as text.
+pub fn effective_gemini_price(per_unit: i64, as_of: &str, now: &str) -> i64 {
+    if now >= GEMINI_RATE_CHANGE && as_of < GEMINI_RATE_CHANGE {
+        per_unit.saturating_mul(2)
+    } else {
+        per_unit
+    }
+}
+
 pub fn month_bounds(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
     let start = Utc
         .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
@@ -65,7 +80,8 @@ pub fn month_bounds(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
 pub struct Spent {
     pub known: i64,
     pub unknown_items: i64,
-    /// Money held back for requests not settled yet; counts toward limits, not toward "spent".
+    /// Money held back for requests not settled yet, and for unknown ones at their reserved amount;
+    /// counts toward limits, not toward "spent".
     pub reserved: i64,
 }
 
@@ -73,7 +89,7 @@ pub fn spent_between(conn: &Connection, start: &str, end: &str) -> Result<Spent,
     let (known, unknown, reserved): (i64, i64, i64) = conn.query_row(
         "SELECT COALESCE(SUM(CASE WHEN status='known' THEN known_micros END),0),
                 COALESCE(SUM(status='unknown'),0),
-                COALESCE(SUM(CASE WHEN status='reserved' THEN reserved END),0)
+                COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN reserved END),0)
          FROM spend WHERE at>=?1 AND at<?2",
         [start, end],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

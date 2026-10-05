@@ -26,6 +26,12 @@ pub struct Config {
     )]
     pub allow_origins: Vec<String>,
 
+    /// Host names this server may be reached by, beyond IP addresses, `localhost`, single-word
+    /// names and `.local`, `.lan`, `.home.arpa` and `.ts.net` names, which are always accepted.
+    /// A browser page on a rebound public name (DNS rebinding) is refused with 403 `host_not_allowed`.
+    #[arg(long = "allow-host", env = "BARDIC_ALLOW_HOSTS", value_delimiter = ',')]
+    pub allow_hosts: Vec<String>,
+
     /// Name shown on every device. Only used the first time; later changes go through the API.
     #[arg(long, env = "BARDIC_SERVER_NAME")]
     pub server_name: Option<String>,
@@ -64,6 +70,7 @@ impl Config {
             bind: "127.0.0.1:0".parse().expect("valid address"),
             max_upload_bytes: 31_457_280,
             allow_origins: Vec::new(),
+            allow_hosts: Vec::new(),
             server_name: Some("Test Bardic".to_string()),
             audio_chunk_chars: 2500,
             job_retry_ms: 2000,

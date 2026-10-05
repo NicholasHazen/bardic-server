@@ -12,6 +12,7 @@ use crate::{
     error::ApiError,
     events::Notice,
     jobs,
+    maintenance::AudioScope,
 };
 use axum::{
     body::Bytes,
@@ -113,9 +114,9 @@ pub async fn create(
         ));
     }
     let (i, j) = (id.clone(), job_id.clone());
-    let (v, title, author, chapters) = state
+    let (v, title, author, chapters) = match state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(audiobook.clone()), at.clone(), move |c| {
             let tx = c.transaction()?;
             let t = target(&tx, &audiobook)?;
             let (title, author): (String, String) = tx.query_row("SELECT title,author FROM books WHERE id=?1", [&t.book_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -125,6 +126,13 @@ pub async fn create(
                 .collect::<Result<_, _>>()?;
             if chapters.is_empty() {
                 return Err(ApiError::conflict("nothing_ready", "No chapter of this audiobook is ready to export."));
+            }
+            // One export per audiobook at a time: asking again returns the one under way.
+            let running: Option<String> = tx
+                .query_row("SELECT id FROM exports WHERE audiobook_id=?1 AND state='running'", [&audiobook], |r| r.get(0))
+                .optional()?;
+            if let Some(r) = running {
+                return Ok((export_value(&tx, &r)?, title, author, Vec::new()));
             }
             tx.execute(
                 "INSERT INTO jobs(id,kind,state,audiobook_id,book_id,chapters_total,started_by,created_at,updated_at) VALUES(?1,'export','running',?2,?3,?4,?5,?6,?6)",
@@ -136,7 +144,11 @@ pub async fn create(
             tx.commit()?;
             Ok((v, title, author, chapters))
         })
-        .await?;
+        .await?
+    {
+        (v, _, _, c) if c.is_empty() => return Ok((StatusCode::ACCEPTED, Json(v))),
+        other => other,
+    };
     jobs::announce(&state, &job_id);
     let st = state.clone();
     tokio::spawn(async move { run(st, id, job_id, title, author, chapters).await });
@@ -151,6 +163,8 @@ async fn run(
     author: String,
     chapters: Vec<Chapter>,
 ) {
+    // One ffmpeg at a time, across audiobooks.
+    let _slot = state.gates.exports.acquire().await.ok();
     let data = state.store.data_dir().to_path_buf();
     let result: Result<i64, String> = async {
         let dir = data.join("exports");

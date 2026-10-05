@@ -1,6 +1,10 @@
 # Server architecture (proposal)
 
-Status: proposal for review. It turns the product spec into a structure; none of it is built. Choices marked **decide** need an owner decision before the milestone that depends on them.
+This document retains the original architecture proposal below. The implementation uses one `bardic-server` crate with modules, axum/tokio and rusqlite behind one blocking connection lock. Chapters are WAV; exports use ffmpeg to produce M4B. See `ROADMAP.md` for completed milestones and remaining provider/platform limits.
+
+Contract 0.5.0 adds server-owned sample flights: one in-flight generation per voice/revision, shared outcomes, settlement after client cancellation, and draining before graceful shutdown releases the data-folder lock. Free sample work has a 120-second total bound. Browser provenance checks cover sample GET/HEAD as well as writes, using Origin or, when absent, Fetch Metadata and Referer. Samples with every provenance header omitted need `X-Bardic-Device`, closing no-referrer media/no-cors requests on plain HTTP LAN addresses. See the Fetch Metadata [trustworthy-URL rule](https://www.w3.org/TR/fetch-metadata/#integration) and Fetch's [no-cors header guard](https://fetch.spec.whatwg.org/#concept-headers-guard).
+
+Ready-file reconciliation runs at startup and before relevant database operations. Missing, non-file or wrong-sized backing files receive `deleted_at`, retaining their metadata, timings, place history and spending. Reconciliation never removes files, reopens completed plans or queues provider work. Free regeneration needs an explicit request; premium regeneration needs an approved plan with the chapter queued. Metadata checks run under the existing blocking store lock; no provider await does.
 
 ## 1. Shape
 
@@ -41,6 +45,8 @@ Suggested crates in a Cargo workspace (start as modules in one crate and split w
 
 ## 3. Data model (sketch)
 
+Chapter structure is deterministic import metadata, separate from immutable chapter text. `importer::structure` reads EPUB navigation and whole-document semantics; `importer` applies fallback names/kinds before storage. Metadata refresh reparses the saved original outside the store lock and matches all ordered text before an atomic title/kind/count update. It never rebuilds chapter identities or revises approved job selections. Chapter list visibility and audio scope selection each use their own `include_matter` flag; premium estimates and approval share the same scope resolver.
+
 - **Identifiers** are opaque, stable and sortable (ULID is a good fit). Chapters and lines keep their ids for the life of a book's text.
 - **Text** is stored once per chapter with `text_sha256`; lines are `(id, start, end)` code point spans into it.
 - **Audio** is a file named by the hash of what it was made from (chapter text hash, voice revision, settings) and never modified. An audiobook chapter points at an audio id. Making a chapter again creates a new file; the old one stays until *free up space*.
@@ -52,7 +58,7 @@ Suggested crates in a Cargo workspace (start as modules in one crate and split w
 
 1. **P1 text unchanged.** No code path writes chapter text after import.
 2. **P2 plan gate.** One function decides whether a premium request may run (plan approved and running, inside its limit and the monthly limit, key valid, scope covers the chapter). It is the only caller of premium `synthesize`. A test enumerates callers.
-3. **P3 durability.** Write audio to a temporary file, flush, rename into place, then record it, then mark the chapter ready. Startup repairs any chapter that claims ready without a file.
+3. **P3 durability.** Write audio to a temporary file, sync its contents, rename into place and, on Unix, sync its directory chain before publishing Ready. Startup and relevant reads reconcile rows against complete files. These checks cover controlled interruption and missing/truncated files; real power-loss durability has not been demonstrated.
 4. **Short transactions.** Never hold a transaction or lock across a provider call.
 5. **Restart safety.** Jobs and plans are persisted state machines; on start, running work becomes `waiting` or `queued` and resumes without re-approval, inside the original limit.
 6. **Money is integers.** Micros everywhere; no floats.

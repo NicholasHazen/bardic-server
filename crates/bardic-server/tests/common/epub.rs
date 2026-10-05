@@ -16,6 +16,8 @@ pub struct Epub {
     pub author: &'static str,
     pub cover: Option<Vec<u8>>,
     pub drm: bool,
+    /// How many times each chapter is listed in the spine (a hostile file repeats entries).
+    pub spine_repeats: usize,
     pub chapters: Vec<(&'static str, &'static str)>,
 }
 
@@ -26,6 +28,7 @@ impl Default for Epub {
             author: "A. Writer",
             cover: Some(png(200, 40, 40)),
             drm: false,
+            spine_repeats: 1,
             chapters: vec![
                 (
                     "The Crossing",
@@ -59,7 +62,7 @@ impl Epub {
                 })
                 .collect();
             let refs: String = (0..self.chapters.len())
-                .map(|i| format!(r#"<itemref idref="c{i}"/>"#))
+                .map(|i| format!(r#"<itemref idref="c{i}"/>"#).repeat(self.spine_repeats))
                 .collect();
             let cover_meta = if self.cover.is_some() {
                 r#"<meta name="cover" content="cov"/>"#

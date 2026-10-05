@@ -100,7 +100,7 @@ async fn check(url: String) {
         .raw(
             "/api/voices/{voice_id}/sample",
             &format!("/api/voices/{}/sample", voice["id"].as_str().unwrap()),
-            &[],
+            &[("x-bardic-device", common::DEVICE)],
             200,
         )
         .await;

@@ -1,0 +1,24 @@
+# Only source and synthetic validation fixtures are sent to Docker. Never include a library.
+**
+!Dockerfile
+!.dockerignore
+!Cargo.toml
+!Cargo.lock
+!crates
+!crates/bardic-server
+!crates/bardic-server/Cargo.toml
+!crates/bardic-server/src
+!crates/bardic-server/src/**
+!crates/bardic-server/migrations
+!crates/bardic-server/migrations/**
+!crates/bardic-server/tests
+!crates/bardic-server/tests/**
+!docs
+!docs/contract
+!docs/contract/**
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.log
+**/.DS_Store

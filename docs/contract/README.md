@@ -2,7 +2,7 @@
 
 `openapi.yaml` (OpenAPI 3.1) is the normative interface between the Bardic server and its clients. It is written from [`docs/PRODUCT-SPEC.md`](../PRODUCT-SPEC.md), not from the prototype. Clients are generated from it; a server is correct when it satisfies it.
 
-**Status:** draft 0.1.0, pre-release. Until 1.0.0, additive changes bump the patch and breaking changes bump the minor.
+**Status:** draft 0.5.1, pre-release. Until 1.0.0, additive changes bump the patch and breaking changes bump the minor.
 
 **Validate:** `uv run --with openapi-spec-validator --with pyyaml python -c "from openapi_spec_validator import validate; from openapi_spec_validator.readers import read_from_filename as r; validate(r('openapi.yaml')[0])"`
 
@@ -55,11 +55,16 @@ Codes used (not exhaustive):
 | Audio | `nothing_ready` |
 | General | `invalid_request`, `device_required`, `listener_required`, `rate_limited`, `storage_full` |
 
+### Browser provenance
+Browser writes and voice-sample GET/HEAD requests must come from the server's own origin or an origin configured with `--allow-origin`; otherwise they return 403 `origin_not_allowed` before provider work. If Origin is absent, the server checks Referer and Fetch Metadata. Cross-site and same-site requests need a trusted Referer, while same-origin requests and direct navigation with Fetch Metadata are allowed. A sample request without Origin, Referer or Sec-Fetch-Site must carry `X-Bardic-Device`, including scripts that send partial metadata such as Sec-Fetch-Mode alone. This closes plain-HTTP LAN requests where browsers may omit Fetch Metadata and suppress Referer: media/no-cors requests cannot add the device header, and cross-origin fetches with it require an allowed CORS preflight. The web client already sends this header. Other operations retain their existing script conventions. The separate Host guard can return 403 `host_not_allowed` for any operation.
+
 ### Routing
 Literal segments win over parameters: `/api/books/duplicates` and `/api/books/sample` are not book ids.
 
 ### Audio delivery
 `getAudio` supports `Range` and is immutable: the id names the exact bytes, so `Cache-Control` is immutable and the ETag is the id. Timings for read-along are a separate immutable resource (`getAudioTimings`).
+
+Ready requires a complete server file. Startup and relevant resource accesses mark missing, non-file or wrong-sized backing files unavailable, preserving their metadata and timings. This reconciliation never contacts a provider. Device copies remain valid; a free chapter can be made again by an explicit request, while premium replacements require the plan flow and never reopen a completed plan.
 
 ## 2. Live updates
 `streamEvents` is one Server-Sent Events stream. Events carry ids only (`Notice`); clients re-read the resource. Listener-scoped notices (places) carry `listener_id` so other listeners' clients ignore them. `Last-Event-ID` resumes; if the server cannot replay it sends `resync`, and clients reload what is on screen. Clients must also work without the stream (poll `getJob`, `getPlan`).
@@ -91,7 +96,7 @@ createPlan   ->  (estimate_id, limit)  ==  the approval  ->  Plan(running) + Job
   - `waiting`: a provider quota or pacing. Resumes by itself after the reset, inside the **original limit**, with no new approval. `Plan.waiting` has the reason and `until`.
   - `needs_you`: limit or Allowance reached, key rejected, content refused, or repeated failure. `Plan.needs_you` says what is kept and what is needed. Continuing inside the limit uses `resumePlan`; raising it uses `resumePlan` with `new_limit`, which is an approval and is audited.
 - `stopPlan`, `pausePlan` and `cancelJob` keep all finished chapters (P3).
-- Premium voice samples are real but tiny requests; they are counted and cached per voice revision.
+- Premium voice samples are real but tiny requests; they are counted and cached per voice revision. Concurrent misses share one generation and spending item, which settles even if a client disconnects. All waiters receive a failed generation's result, and a later request may retry.
 - Prices come from the provider's price interface where one exists (for Google, the Cloud Billing Catalog), are refreshed daily and whenever usage is fetched (`refreshPrices` does it on demand), and carry their date. Where none exists the owner sets a manual table (`putPriceTable`) and estimates are labelled `basis: manual`. Actual spend comes from provider-reported usage (for Gemini, per-request token counts); missing usage becomes `unknown_items`.
 
 ## 5. Offline

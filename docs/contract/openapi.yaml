@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.2.6
+  version: 0.5.1
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -94,7 +94,8 @@ paths:
         A long-lived `text/event-stream`. Each event is a `Notice` carrying ids
         only; clients re-read the resource. Supports `Last-Event-ID` to resume;
         if the server cannot replay from that id it sends a `resync` notice and
-        clients reload what they show.
+        clients reload what they show. At most 64 streams are open at once; the
+        next is refused with 429 `too_many_streams` until one closes.
       x-bardic-cost: none
       parameters:
         - {$ref: '#/components/parameters/Listener'}
@@ -105,6 +106,7 @@ paths:
       responses:
         '404': {$ref: '#/components/responses/NotFound'}
         '400': {$ref: '#/components/responses/InvalidRequest'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/ServerError'}
         '200':
           description: Event stream.
@@ -490,7 +492,9 @@ paths:
       summary: Cover image
       description: |
         The URL in `Book.cover.url` carries the image hash, so responses are
-        immutable and cacheable forever. 404 when the book has no cover.
+        immutable and cacheable forever. Every readable or removed book has a
+        cover: a real one from the file, or a generated one (`Cover.generated`).
+        404 `cover_not_found` only for a book that is still being added.
       x-bardic-cost: none
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
@@ -507,6 +511,12 @@ paths:
       operationId: refreshBookCover
       tags: [Library]
       summary: Re-read the cover from the original file
+      description: |
+        A real cover is re-read from the saved original; the book keeps its
+        cover if the original has none or cannot be read. A generated cover
+        (`Cover.generated`) is drawn again from the book's current title and
+        author, so editing the title or author and then refreshing may change
+        its colour. A generated cover never replaces a real one.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}, {$ref: '#/components/parameters/ListenerOptional'}]
       responses:
@@ -581,6 +591,12 @@ paths:
       operationId: listChapters
       tags: [Library]
       summary: Chapters of a book, in reading order
+      description: Hiding matter filters metadata only; chapter ids and original indices stay unchanged. Direct text and audio access remain available for every chapter.
+      parameters:
+        - name: include_matter
+          in: query
+          schema: {type: boolean, default: true}
+          description: Set false to hide front and back matter.
       x-bardic-cost: none
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
@@ -597,6 +613,39 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/Chapter'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/books/{book_id}/chapters/refresh:
+    parameters: [{$ref: '#/components/parameters/BookId'}]
+    post:
+      operationId: refreshBookChapters
+      tags: [Library]
+      summary: Re-read chapter names and matter kinds from the saved original
+      description: |
+        Repairs display metadata for an existing book without changing text,
+        hashes, chapter or line ids, places, audio, jobs or approved plans.
+        Updates chapter titles, kinds and the book's story counts atomically,
+        only when every chapter's text and order match the saved original.
+        No provider is contacted. Repeating it without metadata changes is a no-op.
+        409 `chapter_structure_changed` when text or chapter boundaries differ,
+        `source_unavailable` when the original cannot be read, or `book_adding`,
+        `book_removed`, `deletion_pending` when the book cannot be edited.
+      x-bardic-cost: none
+      parameters: [{$ref: '#/components/parameters/Device'}]
+      responses:
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '200':
+          description: All chapters with refreshed metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Chapter'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/books/{book_id}/chapters/{chapter_id}/text:
     parameters:
       - {$ref: '#/components/parameters/BookId'}
@@ -629,7 +678,7 @@ paths:
       description: Reads stored text only; sends nothing anywhere.
       x-bardic-cost: none
       parameters:
-        - {name: q, in: query, required: true, schema: {type: string, minLength: 1}}
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 200}}
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/After'}
       responses:
@@ -926,12 +975,32 @@ paths:
       description: |
         Free voices cost nothing. A premium sample is a short real request: it
         counts toward spending and is cached per voice revision, so a repeat is
-        free. Supports `Range` (206). Premium samples arrive with premium audio;
-        until then a Gemini voice answers 409 `source_not_set_up`. A free voice
+        free. Concurrent misses for the same voice revision join one generation
+        and one spending item, even if a requesting client disconnects. A failed
+        generation is shared by its waiters; a later request may retry.
+        Browser requests, including implicit HEAD requests, require this server's
+        origin or an origin configured with `--allow-origin`. A foreign Origin,
+        or cross-site or same-site Fetch Metadata without a trusted Referer when
+        Origin is absent, is refused before generation with 403
+        `origin_not_allowed`. Direct navigation with Fetch Metadata remains
+        allowed. A request with no Origin, Referer or Sec-Fetch-Site must carry
+        `X-Bardic-Device`; this closes the plain-HTTP LAN case where browsers
+        omit provenance, since media and no-cors requests cannot add that header.
+        Scripts, including clients sending partial Fetch Metadata, must send
+        their device id. Without Fetch Metadata or Origin,
+        a supplied Referer must also be trusted. Supports `Range` (206).
+        A Gemini voice needs a working key: without
+        one it answers 409 `source_not_set_up`. A free voice
         whose server has changed it since the last refresh answers 409
         `voice_changed`; a busy server answers 429 `rate_limited`. Errors: `source_not_set_up` (409), `key_rejected` (409),
         `provider_quota` (429).
       x-bardic-cost: may_charge
+      parameters:
+        - name: X-Bardic-Device
+          in: header
+          required: false
+          description: Required when Origin, Referer and Sec-Fetch-Site are all absent. The web client sends it on every request.
+          schema: {type: string, minLength: 8, maxLength: 80}
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
@@ -946,8 +1015,10 @@ paths:
             audio/*:
               schema: {type: string, format: binary}
         '404': {$ref: '#/components/responses/NotFound'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
         '429': {$ref: '#/components/responses/RateLimited'}
+        '416': {description: "Range not satisfiable."}
 
   # ------------------------------------------------------------ Audiobooks
   /api/books/{book_id}/audiobooks:
@@ -1032,7 +1103,10 @@ paths:
       operationId: listAudiobookChapters
       tags: [Audiobooks]
       summary: Audio state of every chapter
-      description: One word per chapter (`not_yet`, `making`, `ready`); reasons are details.
+      description: |
+        One word per chapter (`not_yet`, `making`, `ready`); reasons are details.
+        Ready requires a complete file on the server. Missing, non-file or
+        wrong-sized files are marked unavailable without generating replacements.
       x-bardic-cost: none
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
@@ -1064,7 +1138,11 @@ paths:
         audiobook; otherwise 409 `plan_required`. Joins an already running job
         for the same audiobook: the chapter moves to the front and the job
         becomes urgent (it is served before background jobs). The worker makes
-        one request at a time, because a voice server is one machine's GPU. Errors: `source_not_set_up`, `source_unreachable`,
+        one request at a time, because a voice server is one machine's GPU.
+        A missing or incomplete Ready file is treated as unavailable: an explicit
+        free request can make it again; premium replacement requires an approved
+        running plan that still has this chapter queued. Completed plans are
+        never reopened automatically. Errors: `source_not_set_up`, `source_unreachable`,
         `plan_required`, `allowance_exceeded`, `limit_exceeded` (409).
       x-bardic-cost: may_charge
       parameters:
@@ -1077,7 +1155,11 @@ paths:
             schema:
               type: object
               properties:
-                ahead: {type: integer, minimum: 0, maximum: 5, default: 1, description: "Also queue this many following chapters behind it."}
+                ahead: {type: integer, minimum: 0, maximum: 5, default: 1, description: "Also queue this many following eligible chapters behind it."}
+                include_matter:
+                  type: boolean
+                  default: true
+                  description: Set false to skip front and back matter when queuing following free chapters. The explicitly requested chapter is still honored. Premium requests remain limited to the approved plan's chapter selection.
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '500': {$ref: '#/components/responses/ServerError'}
@@ -1179,7 +1261,10 @@ paths:
       description: |
         Supports `Range`. The id names the exact bytes, so responses are
         immutable (`Cache-Control: public, max-age=31536000, immutable`) and the
-        ETag is the id.
+        ETag is the id. A missing, non-file or wrong-sized backing file answers
+        404 `audio_not_found` and makes its chapter unavailable. This never
+        generates replacement audio or spends. Stored metadata and device copies
+        are kept; regenerating premium audio requires an approved plan.
       x-bardic-cost: none
       responses:
         '400': {$ref: '#/components/responses/InvalidRequest'}
@@ -1296,6 +1381,13 @@ paths:
         stated (no usage reported, a timeout, a stop mid-request) is counted in
         `spent.unknown_items`, never as zero. Gemini answering without audio counts
         as spent and fails that chapter; it is not retried until you resume.
+
+        For the plan's limit and the monthly limit, a request whose cost is
+        unknown still counts at the amount that was held back for it (its high
+        estimate): it may have been billed, so it never makes room to send the
+        same request again. It is shown as an unknown item, not as spent.
+        Stopping a plan takes effect at the next request; one already sent
+        finishes and is kept.
       x-bardic-cost: may_charge
       parameters:
         - {$ref: '#/components/parameters/Listener'}
@@ -1747,7 +1839,9 @@ paths:
         markers, using `ffmpeg` on the Bardic computer. Chapters not made yet are
         left out. Errors (409): `nothing_ready`, `encoder_missing` (no ffmpeg).
         A failed export has job state `failed` with `needs_you.code`
-        `export_failed`. `downloadExport` is 409 `export_not_ready` until the
+        `export_failed`. One export per audiobook runs at a time (asking again
+        returns the one under way) and the computer encodes one at a time.
+        `downloadExport` is 409 `export_not_ready` until the
         export is `ready`, and supports `Range`.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
@@ -1840,7 +1934,9 @@ paths:
         immutable, so they are hard links (a copy where the filesystem cannot
         link), not second copies. The backup is a folder on the same computer: copy
         it elsewhere to survive a lost disk. Returns a job-like `Backup`; poll
-        `listBackups` for `done`.
+        `listBackups` for `done`. The copy of the database does not contain API
+        keys (enter them again after a restore). Only one backup runs at a time; asking again
+        returns the one under way.
       x-bardic-cost: none
       parameters: [{$ref: '#/components/parameters/Device'}]
       responses:
@@ -1932,6 +2028,11 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: Browser provenance or the request host is not allowed; `code` says which.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
     Conflict:
       description: The request conflicts with current state; `code` says how.
       content:
@@ -1981,6 +2082,10 @@ components:
       required: [kind]
       properties:
         kind: {type: string, enum: [whole_book, from_chapter, chapters]}
+        include_matter:
+          type: boolean
+          default: true
+          description: Set false to exclude front and back matter from this scope. Applies to all scope kinds. Estimates, approval and generation use the same selected chapters; omitted keeps the existing all-matter behavior.
         from_chapter_id: {type: [string, 'null']}
         chapter_ids:
           type: array
@@ -2070,9 +2175,17 @@ components:
     # ---- library
     Cover:
       type: object
-      required: [url, sha256, width, height]
+      required: [url, sha256, width, height, generated]
       properties:
         url: {type: string, description: "Root-relative; contains the hash so it is immutable."}
+        generated:
+          type: boolean
+          description: |
+            True when the server drew this cover because the book has none: a
+            2:3 JPEG with a gradient and soft blobs, no text, so clients put
+            the title on it. Its hue comes from a hash of the normalised title
+            and author (the same book has the same colour on every device),
+            and `sample.vivid` is true. False for a cover from the book file.
         sha256: {type: string}
         width: {type: integer}
         height: {type: integer}
@@ -2100,7 +2213,7 @@ components:
     BookState: {type: string, enum: [adding, readable, removed, deleting]}
     Book:
       type: object
-      required: [id, title, author, state, added_at, series, cover, chapter_count, word_count, source_sha256, place]
+      required: [id, title, author, state, added_at, series, cover, chapter_count, story_chapter_count, word_count, source_sha256, place]
       properties:
         id: {type: string}
         title: {type: string}
@@ -2115,7 +2228,19 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/Cover'
-        chapter_count: {type: integer, description: "Story chapters only."}
+        chapter_count:
+          type: integer
+          description: |
+            Every chapter, front and back matter included. This is the number an
+            audiobook covers ("N of M chapters ready"). Before 0.4.0 it counted
+            story chapters only; that count is now `story_chapter_count`.
+        story_chapter_count:
+          type: integer
+          description: |
+            Story chapters only, matter excluded. Matter is front and back
+            matter (copyright, contents, acknowledgements and the like),
+            detected from EPUB chapter titles; plain text has none, so there
+            both counts are equal. `word_count` also counts story chapters only.
         word_count: {type: integer}
         source_sha256: {type: [string, 'null']}
         place:
@@ -2661,7 +2786,7 @@ components:
         state: {type: string, enum: [running, done, failed]}
         created_at: {type: string, format: date-time}
         bytes: {type: [integer, 'null']}
-        path: {type: [string, 'null'], description: "Location on the Bardic computer."}
+        path: {type: [string, 'null'], description: "Location inside the Bardic data folder, e.g. `backups/<id>`."}
     AuditRecord:
       type: object
       required: [id, at, action, actor, target]

@@ -11,6 +11,7 @@ use crate::{
     app::{Actor, AppState, DeviceCtx},
     error::ApiError,
     events::Notice,
+    maintenance::AudioScope,
     plans,
 };
 use axum::{
@@ -42,9 +43,10 @@ pub async fn get_space(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let now = state.clock.now();
     let v = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(id.clone()), state.now(), move |c| {
             let b = load(c, &id)?;
             let (bytes, chapters, chars): (i64, i64, i64) = c.query_row(
                 "SELECT COALESCE(SUM(x.bytes),0), COUNT(*), COALESCE(SUM((SELECT SUM(end-start) FROM lines l WHERE l.chapter_id=x.chapter_id)),0)
@@ -54,6 +56,7 @@ pub async fn get_space(
             )?;
             let remake = if b.tier == "premium" {
                 let (per_unit, as_of, basis): (i64, String, String) = c.query_row("SELECT per_unit,as_of,basis FROM prices WHERE provider='gemini'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                let per_unit = super::money::effective_gemini_price(per_unit, &as_of, &crate::clock::ts(now));
                 let r = plans::estimate(chars, per_unit);
                 json!({ "low": super::money::money(r.low), "likely": super::money::money(r.likely), "high": super::money::money(r.high), "prices_as_of": as_of, "basis": basis })
             } else {
@@ -75,7 +78,7 @@ pub async fn free_space(
     let aid = id.clone();
     let (freed, book, paths) = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(id.clone()), at.clone(), move |c| {
             let tx = c.transaction()?;
             let b = load(&tx, &aid)?;
             let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE audiobook_id=?1 AND state IN ('queued','running','waiting'))", [&aid], |r| r.get(0))?;
@@ -114,7 +117,7 @@ pub async fn manifest(
     let at = state.now();
     let v = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::Audiobook(id.clone()), at.clone(), move |c| {
             let b = load(c, &id)?;
             let cols = AUDIO_COLS.split(',').map(|c| format!("x.{c}")).collect::<Vec<_>>().join(",");
             let items: Vec<Value> = c
@@ -156,7 +159,7 @@ pub async fn sync_check(
     }
     let v = state
         .store
-        .run(move |c| {
+        .run_audio(AudioScope::BookOfAudiobook(id.clone()), state.now(), move |c| {
             let b = load(c, &id)?;
             let (mut current, mut newer) = (vec![], vec![]);
             for h in &input.have {

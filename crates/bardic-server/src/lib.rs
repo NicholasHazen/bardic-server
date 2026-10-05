@@ -16,6 +16,7 @@ pub mod maintenance;
 pub mod places;
 pub mod plans;
 pub mod sample;
+pub mod samples;
 pub mod spend;
 pub mod store;
 pub mod text;
@@ -23,4 +24,4 @@ pub mod voices;
 
 /// Version of `docs/contract/openapi.yaml` this server implements. A test
 /// asserts it matches the contract file.
-pub const API_VERSION: &str = "0.2.6";
+pub const API_VERSION: &str = "0.5.1";

@@ -8,7 +8,7 @@ use crate::{
     store::{Store, StoreError},
 };
 use axum::{
-    extract::{DefaultBodyLimit, FromRequestParts, Request, State},
+    extract::{DefaultBodyLimit, FromRequestParts, MatchedPath, Request, State},
     http::{request::Parts, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -40,7 +40,23 @@ pub struct AppState {
     /// Import ids whose cancellation was requested.
     pub cancelled_imports: Arc<Mutex<std::collections::HashSet<String>>>,
     pub jobs: Arc<crate::jobs::JobSignal>,
+    /// Concurrent sample misses share one request and its settled result.
+    pub samples: Arc<crate::samples::SampleFlights>,
+    /// Limits on work a client can start, so a burst cannot exhaust the computer.
+    pub gates: Arc<Gates>,
     ids: Arc<Mutex<ulid::Generator>>,
+}
+
+/// Most imports processed at once; the rest stay `queued` and start in turn.
+pub const MAX_IMPORTS_AT_ONCE: usize = 3;
+/// Most open event streams (a household has a few devices).
+pub const MAX_EVENT_STREAMS: usize = 64;
+
+pub struct Gates {
+    pub imports: tokio::sync::Semaphore,
+    /// One ffmpeg at a time.
+    pub exports: tokio::sync::Semaphore,
+    pub streams: std::sync::atomic::AtomicUsize,
 }
 
 impl AppState {
@@ -74,6 +90,9 @@ impl AppState {
             c.execute("DELETE FROM books WHERE state='adding'", [])?;
             Ok(())
         })?;
+        // Books added before covers were generated get one now.
+        store.run_blocking(crate::api::books::backfill_generated_covers)?;
+        store.reconcile_audio_startup(&ts(clock.now()))?;
         Ok(AppState {
             store,
             clock,
@@ -82,6 +101,12 @@ impl AppState {
             shutdown: Arc::new(watch::channel(false).0),
             cancelled_imports: Arc::new(Mutex::new(Default::default())),
             jobs: Arc::new(crate::jobs::JobSignal::new()),
+            samples: Arc::new(crate::samples::SampleFlights::default()),
+            gates: Arc::new(Gates {
+                imports: tokio::sync::Semaphore::new(MAX_IMPORTS_AT_ONCE),
+                exports: tokio::sync::Semaphore::new(1),
+                streams: std::sync::atomic::AtomicUsize::new(0),
+            }),
             ids: Arc::new(Mutex::new(ulid::Generator::new())),
         })
     }
@@ -281,49 +306,185 @@ async fn register_device(state: &AppState, id: String) -> Result<DeviceCtx, ApiE
     Ok(ctx)
 }
 
-/// Browser origin rules. Requests without `Origin` (curl, scripts) pass. A browser
-/// request from an origin that is neither this server's own address nor in the
-/// allow-list may not change anything (403 `origin_not_allowed`) and is given no
-/// CORS headers, so the page cannot read the answer either.
+/// Browser origin rules apply to writes and voice-sample GET/HEAD, since even
+/// HEAD uses the sample handler and an uncached premium sample can spend money.
+/// Media/no-cors requests can omit Origin: Referer and Fetch Metadata identify
+/// those browser requests. Samples without provenance require the existing
+/// device header: a browser's no-cors request cannot attach that header.
 async fn origin_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    // DNS rebinding: a page on a public name that was pointed at this machine is "same origin"
+    // by the rule below, so the name the request arrived by must itself be one we expect.
+    let host_header = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !host_allowed(host_header, &state.config) {
+        return ApiError::new(StatusCode::FORBIDDEN, "host_not_allowed", "This server is not reachable by that name. Use its address, or add the name with --allow-host.").into_response();
+    }
     let origin = req
         .headers()
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let Some(origin) = origin else {
-        return next.run(req).await;
-    };
-    let host = req
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let same_origin = origin
-        .split_once("://")
-        .map(|(_, h)| h == host)
-        .unwrap_or(false);
-    let listed = state
-        .config
-        .allow_origins
-        .iter()
-        .any(|o| o.trim_end_matches('/') == origin);
-    let allowed = listed || same_origin;
+    let allowed = browser_page_allowed(req.headers(), host_header, &state.config);
     let mutating = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    let sample = matches!(*req.method(), Method::GET | Method::HEAD)
+        && req
+            .extensions()
+            .get::<MatchedPath>()
+            .is_some_and(|path| path.as_str() == "/api/voices/{voice_id}/sample");
+    let ambiguous_sample = sample
+        && !req.headers().contains_key("x-bardic-device")
+        && !["origin", "referer", "sec-fetch-site"]
+            .iter()
+            .any(|name| req.headers().contains_key(*name));
     if req.method() == Method::OPTIONS && allowed {
-        let mut r = StatusCode::NO_CONTENT.into_response();
-        add_cors(r.headers_mut(), &origin, true);
-        return r;
+        if let Some(origin) = origin.as_deref() {
+            let mut r = StatusCode::NO_CONTENT.into_response();
+            add_cors(r.headers_mut(), origin, true);
+            return r;
+        }
     }
-    if !allowed && mutating {
-        return ApiError::new(StatusCode::FORBIDDEN, "origin_not_allowed", "This page's address is not allowed to change anything on this server. Add it with --allow-origin.")
-            .into_response();
+    if (!allowed && (mutating || sample)) || ambiguous_sample {
+        let detail = if ambiguous_sample {
+            "Voice samples need trusted browser provenance or X-Bardic-Device. Scripts can send their existing device id."
+        } else {
+            "This page's address is not allowed to change anything on this server. Add it with --allow-origin."
+        };
+        let mut resp =
+            ApiError::new(StatusCode::FORBIDDEN, "origin_not_allowed", detail).into_response();
+        if sample {
+            add_sample_vary(resp.headers_mut());
+        }
+        return resp;
     }
     let mut resp = next.run(req).await;
+    if sample {
+        add_sample_vary(resp.headers_mut());
+    }
     if allowed {
-        add_cors(resp.headers_mut(), &origin, false);
+        if let Some(origin) = origin.as_deref() {
+            add_cors(resp.headers_mut(), origin, false);
+        }
     }
     resp
+}
+
+fn add_sample_vary(headers: &mut axum::http::HeaderMap) {
+    // A cache must not reuse an allowed sample or a refusal for a request with
+    // different browser provenance. These are all inputs to the guard below.
+    headers.append(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static(
+            "Origin, Referer, Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest, Sec-Fetch-User, X-Bardic-Device",
+        ),
+    );
+}
+
+fn page_origin_allowed(origin: &str, host: &str, config: &Config) -> bool {
+    let Ok(page) = reqwest::Url::parse(origin) else {
+        return false;
+    };
+    if !matches!(page.scheme(), "http" | "https")
+        || !page.username().is_empty()
+        || page.password().is_some()
+        || page.path() != "/"
+        || page.query().is_some()
+        || page.fragment().is_some()
+    {
+        return false;
+    }
+    let same_address =
+        reqwest::Url::parse(&format!("{}://{host}", page.scheme())).is_ok_and(|server| {
+            page.host_str() == server.host_str()
+                && page.port_or_known_default() == server.port_or_known_default()
+        });
+    same_address
+        || config.allow_origins.iter().any(|listed| {
+            reqwest::Url::parse(listed).is_ok_and(|url| url.origin() == page.origin())
+        })
+}
+
+fn browser_page_allowed(headers: &axum::http::HeaderMap, host: &str, config: &Config) -> bool {
+    // A present opaque/malformed Origin must not fall through to the CLI rule.
+    if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
+        return origin
+            .to_str()
+            .is_ok_and(|origin| page_origin_allowed(origin, host, config));
+    }
+    let site = headers.get("sec-fetch-site");
+    match site.map(|site| site.to_str()) {
+        // Fetch Metadata describes the browser-visible address. A same-origin
+        // reverse proxy can legitimately forward a Referer with another Host.
+        Some(Ok("same-origin" | "none")) => return true,
+        Some(Ok("cross-site" | "same-site")) | None => {}
+        Some(_) => return false,
+    }
+    if let Some(referer) = headers.get(axum::http::header::REFERER) {
+        return referer
+            .to_str()
+            .ok()
+            .and_then(|referer| reqwest::Url::parse(referer).ok())
+            .is_some_and(|page| {
+                page_origin_allowed(&page.origin().ascii_serialization(), host, config)
+            });
+    }
+    match site {
+        // A no-referrer policy must not bypass a known foreign browser request.
+        Some(_) => false,
+        // Node's fetch sends Mode without Site. A script can identify its
+        // device; browser no-cors cannot send this header, while cross-origin
+        // CORS sends Origin and goes through the check above. The device layer
+        // validates the id before any handler can execute.
+        None => {
+            headers.contains_key("x-bardic-device")
+                || !["sec-fetch-mode", "sec-fetch-dest", "sec-fetch-user"]
+                    .iter()
+                    .any(|name| headers.contains_key(*name))
+        }
+    }
+}
+
+/// The host part of a `Host` header: no port, no brackets, lower case, no trailing dot.
+fn host_name(h: &str) -> String {
+    let h = h.trim();
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        h.rsplit_once(':').map_or(h, |(n, p)| {
+            if p.chars().all(|c| c.is_ascii_digit()) {
+                n
+            } else {
+                h
+            }
+        })
+    };
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Names a visitor on the owner's own network uses. Anything with a public suffix is a name an
+/// outside page could have rebound to this machine, so it must be listed.
+fn host_allowed(header: &str, config: &crate::config::Config) -> bool {
+    let name = host_name(header);
+    if name.is_empty() {
+        // HTTP/1.0 or a bare client: nothing to rebind.
+        return true;
+    }
+    if name.parse::<std::net::IpAddr>().is_ok() || name == "localhost" || !name.contains('.') {
+        return true;
+    }
+    if [".local", ".lan", ".home.arpa", ".ts.net", ".localhost"]
+        .iter()
+        .any(|s| name.ends_with(s))
+    {
+        return true;
+    }
+    config.allow_hosts.iter().any(|h| host_name(h) == name)
+        || config.allow_origins.iter().any(|o| {
+            o.split_once("://")
+                .is_some_and(|(_, h)| host_name(h.trim_end_matches('/')) == name)
+        })
 }
 
 fn add_cors(h: &mut axum::http::HeaderMap, origin: &str, preflight: bool) {
@@ -335,7 +496,7 @@ fn add_cors(h: &mut axum::http::HeaderMap, origin: &str, preflight: bool) {
     if preflight {
         h.insert(
             HeaderName::from_static("access-control-allow-methods"),
-            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
         );
         h.insert(
             HeaderName::from_static("access-control-allow-headers"),
@@ -391,6 +552,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/books/{book_id}/remove", post(api::books::remove))
         .route("/api/books/{book_id}/restore", post(api::books::restore))
         .route("/api/books/{book_id}/chapters", get(api::books::chapters))
+        .route(
+            "/api/books/{book_id}/chapters/refresh",
+            post(api::books::refresh_chapters),
+        )
         .route(
             "/api/books/{book_id}/chapters/{chapter_id}/text",
             get(api::books::chapter_text),
@@ -595,6 +760,9 @@ impl Running {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+        // Detached sample workers must settle spending and finish their file
+        // commits before this instance releases the data-folder lock.
+        self.state.samples.shutdown().await;
         // Streams end on the flag; the timeout is a backstop for stuck connections.
         if tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.handle)
             .await

@@ -9,9 +9,13 @@ use crate::text::{
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
+mod structure;
+
 const MAX_ENTRIES: usize = 5_000;
 const MAX_EXPANDED: u64 = 100 * 1024 * 1024;
 const MAX_ENTRY: u64 = 30 * 1024 * 1024;
+/// Most text one book may hold once markup is removed (a long novel is about 1 MB).
+const MAX_BOOK_TEXT: usize = 100 * 1024 * 1024;
 
 pub struct ParsedChapter {
     pub title: String,
@@ -163,7 +167,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
                 out.push(v);
                 i += 3;
                 continue;
@@ -305,6 +312,30 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
         })
         .collect();
 
+    // Navigation is display metadata over the spine, never a second reading
+    // order or a reason to rewrite chapter text. Optional malformed metadata
+    // falls back to headings and names; no provider participates in import.
+    let mut structure = structure::Structure::default();
+    structure.add_guide(&opf_path, &opf_text);
+    let mut items: Vec<_> = manifest.iter().collect();
+    let ncx_id = opf
+        .descendants()
+        .find(|n| local(n) == "spine")
+        .and_then(|n| n.attribute("toc"));
+    items.sort_by_key(|(id, _)| (Some(id.as_str()) != ncx_id, id.as_str()));
+    for (_, item) in items {
+        let path = resolve(&opf_dir, &item.href);
+        if item.props.split_whitespace().any(|p| p == "nav") {
+            if let Ok(raw) = read_entry(&mut zip, &path, MAX_ENTRY) {
+                structure.add_navigation(&path, &String::from_utf8_lossy(&raw));
+            }
+        } else if item.media == "application/x-dtbncx+xml" {
+            if let Ok(raw) = read_entry(&mut zip, &path, MAX_ENTRY) {
+                structure.add_ncx(&path, &String::from_utf8_lossy(&raw));
+            }
+        }
+    }
+
     // Cover: <meta name="cover" content="id"> or properties="cover-image".
     let cover_id = opf
         .descendants()
@@ -328,7 +359,19 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
         .collect();
     let mut chapters: Vec<ParsedChapter> = Vec::new();
     let mut story_n = 0;
+    let mut front_n = 0;
+    let mut back_n = 0;
+    // An entry listed many times in the spine is read once, and the text of a book is capped,
+    // so a small file cannot expand into gigabytes of chapters.
+    let mut seen = std::collections::HashSet::new();
+    let mut text_bytes = 0usize;
     for idref in spine {
+        if !seen.insert(idref.clone()) {
+            continue;
+        }
+        if text_bytes > MAX_BOOK_TEXT {
+            break;
+        }
         let Some(item) = manifest.get(&idref) else {
             continue;
         };
@@ -339,16 +382,20 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
         let Ok(raw) = read_entry(&mut zip, &path, MAX_ENTRY) else {
             continue;
         };
-        let ex = extract_markup(&String::from_utf8_lossy(&raw));
+        let raw = String::from_utf8_lossy(&raw);
+        let ex = extract_markup(&raw);
         if ex.paragraphs.is_empty() {
             continue;
         }
-        let hint = ex
-            .title
+        text_bytes += ex.paragraphs.iter().map(String::len).sum::<usize>();
+        let (navigation_title, structural_kind) = structure.chapter_metadata(&path, &raw);
+        let title = navigation_title.or(ex.title);
+        let unnamed = title.is_none();
+        let hint = title
             .clone()
             .unwrap_or_else(|| idref.replace(['_', '-'], " "));
-        let mut kind = kind_from_title(&hint);
-        if kind == "story" {
+        let mut kind = structural_kind.unwrap_or_else(|| kind_from_title(&hint));
+        if structural_kind.is_none() && unnamed && kind == "story" {
             // File names such as cover.xhtml or toc.xhtml mark matter even without a heading.
             kind = kind_from_title(
                 &item
@@ -361,12 +408,23 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
                     .replace(['_', '-'], " "),
             );
         }
-        let title = match ex.title {
-            Some(t) => t,
-            None => {
-                story_n += 1;
-                format!("Section {story_n}")
+        let fallback = match kind {
+            "front_matter" => {
+                front_n += 1;
+                format!("Front matter {front_n}")
             }
+            "back_matter" => {
+                back_n += 1;
+                format!("Back matter {back_n}")
+            }
+            _ => {
+                story_n += 1;
+                format!("Chapter {story_n}")
+            }
+        };
+        let title = match title {
+            Some(t) => t,
+            None => fallback,
         };
         let (text, lines) = build_chapter(&ex.paragraphs);
         chapters.push(ParsedChapter {
@@ -393,6 +451,199 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::{write::SimpleFileOptions, ZipWriter};
+
+    fn structured_epub(manifest: &str, spine: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut z = ZipWriter::new(Cursor::new(&mut out));
+            let o = SimpleFileOptions::default();
+            z.start_file("META-INF/container.xml", o).unwrap();
+            z.write_all(br#"<container><rootfiles><rootfile full-path="OPS/content.opf"/></rootfiles></container>"#).unwrap();
+            z.start_file("OPS/content.opf", o).unwrap();
+            z.write_all(format!(r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>The Lantern Ferry</dc:title></metadata><manifest>{manifest}</manifest>{spine}</package>"#).as_bytes()).unwrap();
+            for (path, text) in files {
+                z.start_file(*path, o).unwrap();
+                z.write_all(text.as_bytes()).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn epub_navigation_names_and_semantics_follow_spine_without_changing_text() {
+        let manifest = r#"<item id="nav" href="nav/toc.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="c0" href="text/c0.xhtml" media-type="application/xhtml+xml"/><item id="c1" href="text/café 1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/c2.xhtml" media-type="application/xhtml+xml"/><item id="c3" href="text/c3.xhtml" media-type="application/xhtml+xml"/>"#;
+        let bytes = structured_epub(manifest, r#"<spine><itemref idref="c0"/><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/></spine>"#, &[
+            ("OPS/nav/toc.xhtml", r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="page-list"><a href="../text/c2.xhtml">Page 2</a></nav><nav epub:type="toc"><ol><li><a href="../text/c2.xhtml">The Far Shore</a></li><li><a href="../text/caf%C3%A9%201.xhtml#start">Chapter 1: Café &amp; Lanterns</a></li><li><a href="../text/c0.xhtml">Before the voyage</a></li><li><a href="../text/c3.xhtml">After the voyage</a></li></ol></nav></body></html>"#),
+            ("OPS/text/c0.xhtml", r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body epub:type="frontmatter"><p>An original notice.</p></body></html>"#),
+            ("OPS/text/café 1.xhtml", r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body epub:type="chapter"><h1 id="start">One</h1><p>The café bell rang 😀.</p></body></html>"#),
+            ("OPS/text/c2.xhtml", "<html><head><title>Generic</title></head><body><p>The ferry arrived.</p></body></html>"),
+            ("OPS/text/c3.xhtml", "<html><body role=\"doc-acknowledgments\"><p>Thanks to the crew.</p></body></html>"),
+        ]);
+        let book = parse("lantern.epub", &bytes).unwrap();
+        let titles: Vec<_> = book.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Before the voyage",
+                "Chapter 1: Café & Lanterns",
+                "The Far Shore",
+                "After the voyage"
+            ]
+        );
+        let kinds: Vec<_> = book.chapters.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, ["front_matter", "story", "story", "back_matter"]);
+        assert_eq!(book.chapters[1].text, "One\n\nThe café bell rang 😀.");
+        let chars: Vec<_> = book.chapters[1].text.chars().collect();
+        let (start, end) = book.chapters[1].lines[1];
+        assert_eq!(
+            chars[start..end].iter().collect::<String>(),
+            "The café bell rang 😀."
+        );
+    }
+
+    #[test]
+    fn broken_navigation_falls_back_to_ncx_and_unknown_names_use_chapters() {
+        let manifest = r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="ncx" href="nav/toc.ncx" media-type="application/x-dtbncx+xml"/><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>"#;
+        let bytes = structured_epub(
+            manifest,
+            r#"<spine toc="ncx"><itemref idref="c1"/><itemref idref="c2"/></spine>"#,
+            &[
+                ("OPS/nav.xhtml", "<broken"),
+                (
+                    "OPS/nav/toc.ncx",
+                    r#"<ncx><navMap><navPoint><navLabel><text>The Crossing</text></navLabel><content src="../c1.xhtml"/></navPoint></navMap></ncx>"#,
+                ),
+                (
+                    "OPS/c1.xhtml",
+                    "<html><body><p>A lantern glowed.</p></body></html>",
+                ),
+                (
+                    "OPS/c2.xhtml",
+                    "<html><body><p>The river turned.</p></body></html>",
+                ),
+            ],
+        );
+        let book = parse("lantern.epub", &bytes).unwrap();
+        assert_eq!(book.chapters[0].title, "The Crossing");
+        assert_eq!(book.chapters[1].title, "Chapter 2");
+        assert!(book.chapters.iter().all(|c| c.kind == "story"));
+    }
+
+    #[test]
+    fn a_named_story_is_not_matter_just_because_of_its_filename() {
+        let bytes = structured_epub(
+            r#"<item id="c1" href="index.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<spine><itemref idref="c1"/></spine>"#,
+            &[(
+                "OPS/index.xhtml",
+                "<html><body><h1>Chapter 1: The Crossing</h1><p>The ferry left.</p></body></html>",
+            )],
+        );
+        let book = parse("lantern.epub", &bytes).unwrap();
+        assert_eq!(book.chapters[0].title, "Chapter 1: The Crossing");
+        assert_eq!(book.chapters[0].kind, "story");
+    }
+
+    #[test]
+    fn sibling_navigation_in_one_mixed_source_unit_keeps_the_story_eligible() {
+        let bytes = structured_epub(
+            r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="c1" href="mixed.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<spine><itemref idref="c1"/></spine>"#,
+            &[
+                (
+                    "OPS/nav.xhtml",
+                    r#"<nav role="doc-toc"><ol><li><a href="mixed.xhtml#rights">Copyright</a></li><li><a href="mixed.xhtml#story">The Crossing</a></li></ol></nav>"#,
+                ),
+                (
+                    "OPS/mixed.xhtml",
+                    r#"<html><body><h1 id="rights">Copyright</h1><p>An original notice.</p><h1 id="story">The Crossing</h1><p>The ferry left.</p></body></html>"#,
+                ),
+            ],
+        );
+        let book = parse("lantern.epub", &bytes).unwrap();
+        assert_eq!(book.chapters.len(), 1);
+        assert_eq!(book.chapters[0].kind, "story");
+        assert_eq!(
+            book.chapters[0].text,
+            "Copyright\n\nAn original notice.\n\nThe Crossing\n\nThe ferry left."
+        );
+    }
+
+    #[test]
+    fn mixed_semantic_sections_without_navigation_keep_the_story_eligible() {
+        let bytes = structured_epub(
+            r#"<item id="c1" href="mixed.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<spine><itemref idref="c1"/></spine>"#,
+            &[(
+                "OPS/mixed.xhtml",
+                r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><section epub:type="copyright-page"><h1>Copyright</h1><p>An original notice.</p></section><section epub:type="chapter"><h1>The Crossing</h1><p>Mira rowed home 😀.</p></section></body></html>"#,
+            )],
+        );
+        let book = parse("lantern.epub", &bytes).unwrap();
+        assert_eq!(book.chapters.len(), 1);
+        assert_eq!(book.chapters[0].title, "Copyright");
+        assert_eq!(book.chapters[0].kind, "story");
+        assert_eq!(
+            book.chapters[0].text,
+            "Copyright\n\nAn original notice.\n\nThe Crossing\n\nMira rowed home 😀."
+        );
+        let chars: Vec<_> = book.chapters[0].text.chars().collect();
+        let (start, end) = book.chapters[0].lines[3];
+        assert_eq!(
+            chars[start..end].iter().collect::<String>(),
+            "Mira rowed home 😀."
+        );
+    }
+
+    #[test]
+    fn conflicting_whole_document_semantics_do_not_fall_back_to_a_matter_heading() {
+        for semantics in ["frontmatter bodymatter", "frontmatter backmatter"] {
+            let raw = format!(
+                r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body epub:type="{semantics}"><h1>Copyright</h1><p>The ferry left at dawn.</p></body></html>"#
+            );
+            let bytes = structured_epub(
+                r#"<item id="c1" href="copyright.xhtml" media-type="application/xhtml+xml"/>"#,
+                r#"<spine><itemref idref="c1"/></spine>"#,
+                &[("OPS/copyright.xhtml", &raw)],
+            );
+            let book = parse("lantern.epub", &bytes).unwrap();
+            assert_eq!(book.chapters.len(), 1);
+            assert_eq!(book.chapters[0].kind, "story", "{semantics}");
+            assert_eq!(
+                book.chapters[0].text,
+                "Copyright\n\nThe ferry left at dawn."
+            );
+        }
+    }
+
+    #[test]
+    fn coherent_matter_stays_matter_and_nested_notes_keep_their_story_unit() {
+        let cases = [
+            (
+                r#"<body epub:type="frontmatter"><nav epub:type="toc"><a epub:type="chapter" href="elsewhere.xhtml">Unrelated story link</a></nav><section epub:type="copyright-page"><h1>Copyright</h1><p>An original notice.</p></section></body>"#,
+                "front_matter",
+                "Copyright\n\nAn original notice.",
+            ),
+            (
+                r#"<body><section epub:type="chapter"><h1>The Crossing</h1><p>Mira rowed home.</p><aside epub:type="backmatter"><p>A note about lanterns.</p></aside></section></body>"#,
+                "story",
+                "The Crossing\n\nMira rowed home.\n\nA note about lanterns.",
+            ),
+        ];
+        for (body, kind, text) in cases {
+            let raw = format!(r#"<html xmlns:epub="http://www.idpf.org/2007/ops">{body}</html>"#);
+            let bytes = structured_epub(
+                r#"<item id="c1" href="one.xhtml" media-type="application/xhtml+xml"/>"#,
+                r#"<spine><itemref idref="c1"/></spine>"#,
+                &[("OPS/one.xhtml", &raw)],
+            );
+            let book = parse("lantern.epub", &bytes).unwrap();
+            assert_eq!(book.chapters.len(), 1);
+            assert_eq!(book.chapters[0].kind, kind);
+            assert_eq!(book.chapters[0].text, text);
+        }
+    }
 
     pub fn build_epub(encryption: Option<&str>, with_cover: bool) -> Vec<u8> {
         let mut out = Vec::new();
@@ -516,5 +767,6 @@ mod tests {
         assert_eq!(resolve("OEBPS", "../../etc/passwd"), "etc/passwd");
         assert_eq!(resolve("OEBPS", "a/../b.xhtml#frag"), "OEBPS/b.xhtml");
         assert_eq!(resolve("OEBPS", "/abs.xhtml"), "abs.xhtml");
+        assert_eq!(resolve("OEBPS", "café%😀.xhtml"), "OEBPS/café%😀.xhtml");
     }
 }

@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     extract::{Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     Json,
 };
@@ -207,7 +207,24 @@ fn to_event(id: Option<u64>, notice: &Notice) -> Event {
 pub async fn stream_events(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    use std::sync::atomic::Ordering;
+    if state.gates.streams.fetch_add(1, Ordering::SeqCst) >= crate::app::MAX_EVENT_STREAMS {
+        state.gates.streams.fetch_sub(1, Ordering::SeqCst);
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_streams",
+            "Too many devices are listening for changes. Close one and try again.",
+        ));
+    }
+    // Released when the stream is dropped, however it ends.
+    struct Slot(std::sync::Arc<crate::app::Gates>);
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.streams.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let slot = Slot(state.gates.clone());
     let last = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
@@ -246,8 +263,11 @@ pub async fn stream_events(
     let live = live.take_until(async move {
         let _ = stop.wait_for(|v| *v).await;
     });
-    Sse::new(stream::iter(initial).chain(live))
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    let body = stream::iter(initial).chain(live).map(move |e| {
+        let _ = &slot;
+        e
+    });
+    Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 /// Listener-scoped notices go only to that listener's clients; others go to all.
