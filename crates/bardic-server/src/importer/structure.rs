@@ -4,7 +4,7 @@
 //! Broken optional XML and links are ignored so readable source still imports.
 
 use roxmltree::{Document, Node};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const EPUB: &str = "http://www.idpf.org/2007/ops";
 
@@ -14,6 +14,7 @@ pub(super) struct Structure {
     ncx: Vec<Target>,
     landmarks: Vec<Target>,
     guide: Vec<Target>,
+    pages: Vec<Target>,
 }
 
 struct Target {
@@ -34,8 +35,9 @@ impl Structure {
                 &mut self.navigation
             } else if tokens.iter().any(|t| t == "landmarks") {
                 &mut self.landmarks
+            } else if tokens.iter().any(|t| t == "page-list" || t == "pagelist") {
+                &mut self.pages
             } else {
-                // A page-list is pagination, not a list of chapter titles.
                 continue;
             };
             for link in nav.descendants().filter(|n| named(*n, "a")) {
@@ -94,6 +96,28 @@ impl Structure {
                     .skip(1)
                     .filter(|n| named(*n, "navPoint"))
                     .count(),
+                kind: None,
+            });
+        }
+        for point in doc.descendants().filter(|n| named(*n, "pageTarget")) {
+            let Some((path, fragment)) = point
+                .children()
+                .find(|n| named(*n, "content"))
+                .and_then(|n| n.attribute("src"))
+                .and_then(|s| resolve(path, s))
+            else {
+                continue;
+            };
+            let label = point
+                .children()
+                .find(|n| named(*n, "navLabel"))
+                .map(label)
+                .unwrap_or_default();
+            self.pages.push(Target {
+                path,
+                fragment,
+                label,
+                depth: 0,
                 kind: None,
             });
         }
@@ -202,6 +226,105 @@ impl Structure {
             });
         (chosen.map(|target| target.label.clone()), kind)
     }
+
+    /// Pages are source metadata, not a reading-time/word-count estimate.
+    /// Require a first source-page boundary before the first readable word and
+    /// consecutive numeric page labels. A partial list, an unresolved anchor,
+    /// a chapter beginning partway through a page or ambiguous labels is unknown.
+    pub(super) fn page_count(&self, path: &str, raw: &str) -> Option<i64> {
+        let doc = xml(raw).ok()?;
+        let mut anchor_counts = HashMap::new();
+        for id in doc.descendants().filter_map(|node| node.attribute("id")) {
+            *anchor_counts.entry(id).or_insert(0usize) += 1;
+        }
+        let mut linked = HashMap::new();
+        for page in self.pages.iter().filter(|page| page.path == path) {
+            let id = page.fragment.as_deref()?;
+            if anchor_counts.get(id) != Some(&1) {
+                return None;
+            }
+            let number = page_number(&page.label)?;
+            if linked.insert(id, number).is_some_and(|old| old != number) {
+                return None;
+            }
+        }
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|node| named(*node, "body"))
+            .unwrap_or(doc.root_element());
+        let mut pending = vec![(body, false)];
+        let mut seen_text = false;
+        let mut previous = None;
+        let mut count = 0;
+        let mut page_has_text = false;
+        while let Some((node, inside_page_marker)) = pending.pop() {
+            if node.is_element()
+                && ["script", "style", "head", "nav", "svg"]
+                    .iter()
+                    .any(|name| named(node, name))
+            {
+                continue;
+            }
+            let mut is_page_marker = inside_page_marker;
+            if node.is_element() {
+                let from_list = node.attribute("id").and_then(|id| linked.remove(id));
+                let marked = semantics(node).iter().any(|token| token == "pagebreak");
+                is_page_marker |= marked;
+                let from_marker = if marked {
+                    Some(page_number(
+                        node.attribute("aria-label")
+                            .or_else(|| node.attribute("title"))
+                            .map(str::to_string)
+                            .unwrap_or_else(|| label(node))
+                            .as_str(),
+                    ))
+                } else {
+                    None
+                };
+                let number = match (from_list, from_marker) {
+                    (Some(list), Some(Some(marker))) if list != marker => return None,
+                    (Some(list), _) => Some(list),
+                    (None, Some(marker)) => Some(marker?),
+                    (None, None) => None,
+                };
+                if let Some(number) = number {
+                    if previous.is_none() && seen_text
+                        || previous.is_some_and(|last: i64| last.checked_add(1) != Some(number))
+                    {
+                        return None;
+                    }
+                    previous = Some(number);
+                    page_has_text = false;
+                }
+            }
+            if node.is_text()
+                && !inside_page_marker
+                && node.text().is_some_and(|text| !text.trim().is_empty())
+            {
+                seen_text = true;
+                if previous.is_some() && !page_has_text {
+                    count += 1;
+                    page_has_text = true;
+                }
+            }
+            pending.extend(node.children().rev().map(|child| (child, is_page_marker)));
+        }
+        (linked.is_empty() && count > 0).then_some(count)
+    }
+}
+
+fn page_number(label: &str) -> Option<i64> {
+    let label = label.trim();
+    let label = label
+        .strip_prefix("Page ")
+        .or_else(|| label.strip_prefix("page "))
+        .unwrap_or(label)
+        .trim();
+    if label.is_empty() || !label.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    label.parse::<i64>().ok().filter(|number| *number > 0)
 }
 
 fn xml(raw: &str) -> Result<Document<'_>, roxmltree::Error> {
@@ -435,6 +558,87 @@ mod tests {
 
     fn chapter(body: &str) -> String {
         format!(r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body>{body}</body></html>"#)
+    }
+
+    #[test]
+    fn page_lists_count_consecutive_source_pages_without_naming_chapters() {
+        let mut s = Structure::default();
+        s.add_navigation("OPS/nav.xhtml", r#"<nav role="doc-pagelist"><a href="one.xhtml#p10">10</a><a href="one.xhtml#p11">11</a><a href="one.xhtml#p11">11</a></nav>"#);
+        // The role spelling for EPUB pagination is doc-pagelist; EPUB type
+        // page-list is also supported below.
+        s.add_navigation("OPS/nav.xhtml", r#"<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="page-list"><a href="one.xhtml#p10">10</a><a href="one.xhtml#p11">11</a></nav>"#);
+        let raw = chapter(
+            r#"<span id="p10"/><h1>Arrival</h1><p>The ferry rang.</p><span id="p11"/><p>The crew woke.</p>"#,
+        );
+        assert_eq!(s.page_count("OPS/one.xhtml", &raw), Some(2));
+        assert_eq!(s.chapter_metadata("OPS/one.xhtml", &raw).0, None);
+    }
+
+    #[test]
+    fn pagebreaks_and_ncx_pages_are_source_metadata() {
+        let raw = chapter(
+            r#"<span id="p10" epub:type="pagebreak" title="10"/><h1>Arrival</h1><span id="p11" role="doc-pagebreak" aria-label="Page 11"/><p>Words.</p>"#,
+        );
+        assert_eq!(Structure::default().page_count("one.xhtml", &raw), Some(2));
+        let mut ncx = Structure::default();
+        ncx.add_ncx("OPS/toc.ncx", r#"<ncx><pageList><pageTarget><navLabel><text>10</text></navLabel><content src="one.xhtml#p10"/></pageTarget><pageTarget><navLabel><text>11</text></navLabel><content src="one.xhtml#p11"/></pageTarget></pageList></ncx>"#);
+        assert_eq!(ncx.page_count("OPS/one.xhtml", &raw), Some(2));
+    }
+
+    #[test]
+    fn empty_source_page_boundaries_do_not_add_pages_to_chapter_text() {
+        let s = Structure::default();
+        for body in [
+            r#"<span role="doc-pagebreak" title="10"/><p>Words.</p><span role="doc-pagebreak" title="11"/>"#,
+            r#"<span role="doc-pagebreak" title="9"/><span role="doc-pagebreak" title="10"/><p>Words.</p>"#,
+            r#"<span role="doc-pagebreak" title="9">9</span><span role="doc-pagebreak" title="10">10</span><p>Words.</p>"#,
+        ] {
+            assert_eq!(s.page_count("one.xhtml", &chapter(body)), Some(1), "{body}");
+        }
+        assert_eq!(
+            s.page_count(
+                "one.xhtml",
+                &chapter(r#"<span role="doc-pagebreak" title="9">9</span>"#)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn incomplete_or_ambiguous_source_pagination_is_unknown() {
+        let s = Structure::default();
+        for body in [
+            "<p>No page metadata.</p>",
+            r#"<p>Already reading.</p><span role="doc-pagebreak" title="10"/>"#,
+            r#"<span role="doc-pagebreak" title="10"/><p>Words.</p><span role="doc-pagebreak" title="12"/>"#,
+            r#"<span role="doc-pagebreak" title="10"/><p>Words.</p><span role="doc-pagebreak" title="10"/>"#,
+            r#"<span role="doc-pagebreak" title="iv"/><p>Words.</p>"#,
+            r#"<span role="doc-pagebreak"/><p>Words.</p>"#,
+            r#"<head><span role="doc-pagebreak" title="10"/></head><p>Words.</p>"#,
+        ] {
+            assert_eq!(s.page_count("one.xhtml", &chapter(body)), None, "{body}");
+        }
+        for links in [
+            r#"<a href="one.xhtml#missing">10</a>"#,
+            r#"<a href="one.xhtml">10</a>"#,
+            r#"<a href="one.xhtml#p10">10</a><a href="one.xhtml#p10">11</a>"#,
+        ] {
+            let mut s = Structure::default();
+            s.add_navigation("nav.xhtml", &format!(r#"<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="page-list">{links}</nav>"#));
+            assert_eq!(
+                s.page_count("one.xhtml", &chapter(r#"<span id="p10"/><p>Words.</p>"#)),
+                None
+            );
+        }
+        let mut s = Structure::default();
+        s.add_navigation("nav.xhtml", r#"<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="page-list"><a href="one.xhtml#p10">10</a></nav>"#);
+        assert_eq!(
+            s.page_count(
+                "one.xhtml",
+                &chapter(r#"<span id="p10"/><p>Words.</p><span id="p10"/>"#)
+            ),
+            None
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub struct ParsedChapter {
     pub kind: &'static str,
     pub text: String,
     pub lines: Vec<(usize, usize)>,
+    pub page_count: Option<i64>,
 }
 
 pub struct ParsedBook {
@@ -129,6 +130,7 @@ pub fn parse_txt(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFail
                 title: t,
                 text,
                 lines,
+                page_count: None,
             }
         })
         .collect();
@@ -432,6 +434,7 @@ pub fn parse_epub(file_name: &str, bytes: &[u8]) -> Result<ParsedBook, ImportFai
             kind,
             text,
             lines,
+            page_count: structure.page_count(&path, &raw),
         });
     }
     if chapters.iter().all(|c| c.text.trim().is_empty()) {
@@ -543,6 +546,28 @@ mod tests {
         let book = parse("lantern.epub", &bytes).unwrap();
         assert_eq!(book.chapters[0].title, "Chapter 1: The Crossing");
         assert_eq!(book.chapters[0].kind, "story");
+    }
+
+    #[test]
+    fn converted_document_identifiers_use_matter_fallback_without_changing_words() {
+        let bytes = structured_epub(
+            r#"<item id="cD" href="dedication.xhtml" media-type="application/xhtml+xml"/><item id="c1" href="chapter01.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<spine><itemref idref="cD"/><itemref idref="c1"/></spine>"#,
+            &[
+                ("OPS/dedication.xhtml", "<html><head><title>cD</title></head><body><p>For the invented crew.</p></body></html>"),
+                ("OPS/chapter01.xhtml", "<html><head><title>chapter01</title></head><body><h1>cD</h1><h2>Chapter 1: The Crossing</h2><p>The ferry left.</p></body></html>"),
+            ],
+        );
+        let book = parse("lantern.epub", &bytes).unwrap();
+        assert_eq!(book.chapters[0].title, "Front matter 1");
+        assert_eq!(book.chapters[0].kind, "front_matter");
+        assert_eq!(book.chapters[0].text, "For the invented crew.");
+        assert_eq!(book.chapters[1].title, "Chapter 1: The Crossing");
+        assert_eq!(book.chapters[1].kind, "story");
+        assert_eq!(
+            book.chapters[1].text,
+            "cD\n\nChapter 1: The Crossing\n\nThe ferry left."
+        );
     }
 
     #[test]

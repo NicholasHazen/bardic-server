@@ -71,6 +71,84 @@ async fn updates(s: &TestServer) -> Value {
 }
 
 #[tokio::test]
+async fn chapter_lengths_count_unicode_and_safe_refresh_backfills_source_pages() {
+    let s = TestServer::start().await;
+    let paged = Epub {
+        cover: None,
+        chapters: vec![
+            // Source page markers carry no canonical words. Empty first h1 is
+            // intentional: the test fixture's helper wraps the supplied title.
+            (
+                r#"</h1><span role="doc-pagebreak" aria-label="Page 10"/><h1>Chapter 1: Café 😀"#,
+                r#"Zoë rang the bell 😀.</p><span role="doc-pagebreak" aria-label="Page 11"/><p>The crew woke."#,
+            ),
+            ("Chapter 2: Shore", "No source pagination exists here."),
+        ],
+        ..Epub::default()
+    };
+    let book = s.add_book("pages.epub", paged.build()).await;
+    let expected = chapters(&s, &book, "").await;
+    assert_eq!(expected["items"][0]["page_count"], 2);
+    assert_eq!(expected["items"][1]["page_count"], Value::Null);
+    let mut texts = Vec::new();
+    for chapter in expected["items"].as_array().unwrap() {
+        let exact = text(&s, &book, chapter).await;
+        let canonical = exact["text"].as_str().unwrap();
+        assert_eq!(chapter["text_length"], canonical.chars().count());
+        texts.push(exact);
+    }
+    assert_ne!(
+        expected["items"][0]["text_length"],
+        texts[0]["text"].as_str().unwrap().len()
+    );
+    let target = book.clone();
+    s.running
+        .as_ref()
+        .unwrap()
+        .state
+        .store
+        .run(move |c| {
+            c.execute(
+                "UPDATE chapters SET page_count=NULL WHERE book_id=?1",
+                [&target],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        chapters(&s, &book, "").await["items"][0]["page_count"],
+        Value::Null
+    );
+    let refreshed = s
+        .post(
+            REFRESH,
+            &format!("/api/books/{book}/chapters/refresh"),
+            json!({}),
+            200,
+        )
+        .await;
+    assert_eq!(refreshed, expected);
+    for (i, chapter) in refreshed["items"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(text(&s, &book, chapter).await, texts[i]);
+    }
+    let audit = updates(&s).await;
+    assert_eq!(audit["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        s.post(
+            REFRESH,
+            &format!("/api/books/{book}/chapters/refresh"),
+            json!({}),
+            200
+        )
+        .await,
+        refreshed
+    );
+    assert_eq!(updates(&s).await, audit);
+    s.stop().await;
+}
+
+#[tokio::test]
 async fn hiding_matter_preserves_indices_ids_and_direct_text_access() {
     let s = TestServer::start().await;
     let book = s.add_book("matter.epub", matter_epub().build()).await;

@@ -460,6 +460,7 @@ pub async fn sample(
                 kind: "story",
                 text: t,
                 lines,
+                page_count: None,
             }
         })
         .collect();
