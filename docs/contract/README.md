@@ -2,7 +2,7 @@
 
 `openapi.yaml` (OpenAPI 3.1) is the normative interface between the Bardic server and its clients. It is written from [`docs/PRODUCT-SPEC.md`](../PRODUCT-SPEC.md), not from the prototype. Clients are generated from it; a server is correct when it satisfies it.
 
-**Status:** draft 0.5.2, pre-release. Until 1.0.0, additive changes bump the patch and breaking changes bump the minor.
+**Status:** draft 0.5.3, pre-release. Until 1.0.0, additive changes bump the patch and breaking changes bump the minor.
 
 **Validate:** `uv run --with openapi-spec-validator --with pyyaml python -c "from openapi_spec_validator import validate; from openapi_spec_validator.readers import read_from_filename as r; validate(r('openapi.yaml')[0])"`
 
@@ -68,6 +68,8 @@ Ready requires a complete server file. Startup and relevant resource accesses ma
 
 ## 2. Live updates
 `streamEvents` is one Server-Sent Events stream. Events carry ids only (`Notice`); clients re-read the resource. Listener-scoped notices (places) carry `listener_id` so other listeners' clients ignore them. `Last-Event-ID` resumes; if the server cannot replay it sends `resync`, and clients reload what is on screen. Clients must also work without the stream (poll `getJob`, `getPlan`).
+
+Audio jobs publish `Job.generation` for the current chapter: retained request and Unicode character counts, active request time and measured chapter/job generation estimates. A completed request advances progress only after its audio bytes and recovery record are durable. Complete request progress still needs final file assembly before the chapter is Ready. Estimates are null until a successful request supplies a timing sample, and while the job is waiting, paused or needs attention. They describe generation time and exclude unknown future provider waits. A resumed/restarted chapter retains valid completed requests, resets its elapsed attempt time, and uses only request measurements from the same job.
 
 ## 3. Place sync protocol
 Goal: P5 and P7 (places follow the listener; the listener chooses when two disagree).

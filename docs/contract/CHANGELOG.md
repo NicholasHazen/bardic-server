@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.5.3 (audio generation progress; additive)
+- `Job.generation` is an optional nullable current-chapter object with durable request/Unicode character progress, active provider request elapsed time, and nullable measured chapter/job generation estimates. Existing job kinds return null.
+- Generation estimates use successful provider request times within the job, stay unknown before a sample exists, and are suppressed while waiting, paused or needing attention. Waiting time and retry delays do not become measured generation throughput.
+- Resume/restart preserves valid chapter request parts while resetting the current attempt's elapsed time; progress never makes a chapter Ready before its complete file is durable.
+
 ## 0.5.2 (chapter reading metadata; additive)
 - `Chapter.text_length` is the exact Unicode code point length of stored text, including paragraph separators. Clients can show chapter progress from the listener's text offset without fetching every chapter's text.
 - `Chapter.page_count` is nullable source pagination: known only when valid EPUB page-list/pagebreak markers begin at the chapter start and supply consecutive numbered pages. Missing, incomplete or ambiguous pagination stays null; word counts and display size never become invented pages. Existing imports gain it through the same safe metadata refresh.

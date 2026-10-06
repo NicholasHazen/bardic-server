@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.5.2
+  version: 0.5.3
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -2700,6 +2700,11 @@ components:
         chapters_total: {type: integer}
         chapters_done: {type: integer}
         current_chapter_id: {type: [string, 'null']}
+        generation:
+          description: "Durable request progress for the current audio chapter, or null when no chapter is active. Generation estimates use successful request timings measured within this job; they are unknown until a measurement exists and null while waiting, paused or needing attention. Finishing every request does not publish Ready until the complete audio file is durable."
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/GenerationProgress'
         waiting:
           oneOf:
             - type: 'null'
@@ -2711,6 +2716,18 @@ components:
         started_by: {$ref: '#/components/schemas/Actor'}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
+    GenerationProgress:
+      type: object
+      required: [chapter_id, requests_done, requests_total, characters_done, characters_total, elapsed_seconds, chapter_seconds_remaining, job_seconds_remaining]
+      properties:
+        chapter_id: {type: string}
+        requests_done: {type: integer, minimum: 0, description: "Successfully generated requests durably retained for this chapter, including reusable requests from a previous attempt."}
+        requests_total: {type: integer, minimum: 0}
+        characters_done: {type: integer, minimum: 0, description: "Unicode code points in the durably retained requests."}
+        characters_total: {type: integer, minimum: 0, description: "Unicode code points in the exact provider request text, including separators inside a request."}
+        elapsed_seconds: {type: number, minimum: 0, description: "Active provider request time during this chapter attempt. Retry delays, provider quota waits and pauses between attempts are excluded; resets when the chapter starts again."}
+        chapter_seconds_remaining: {type: [number, 'null'], minimum: 0, description: "Estimated generation time for remaining chapter text from measured successful-request throughput. Excludes unknown future waits and final file assembly."}
+        job_seconds_remaining: {type: [number, 'null'], minimum: 0, description: "Estimated generation time for remaining selected text in this job from measured successful-request throughput. Excludes unknown future waits and final file assembly."}
     JobPage:
       type: object
       required: [items, next]

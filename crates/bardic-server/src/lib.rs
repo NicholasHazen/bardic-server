@@ -24,4 +24,4 @@ pub mod voices;
 
 /// Version of `docs/contract/openapi.yaml` this server implements. A test
 /// asserts it matches the contract file.
-pub const API_VERSION: &str = "0.5.2";
+pub const API_VERSION: &str = "0.5.3";
