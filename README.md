@@ -48,7 +48,7 @@ Raise the limit only when the configured Breeze address has independent inferenc
 
 ## Container deployment
 
-The root Dockerfile builds a non-root Linux server image with ffmpeg and a persistent `/data` directory. The web repository owns the two-service Compose stack and [deployment guide](../bardic-web/docs/DEPLOYMENT.md), including host ownership, private HTTPS, backups and restores. Run one server per local data directory. SIGTERM and SIGINT both drain the server before releasing its lock; Compose allows five minutes for admitted samples to settle. The API contract is 0.5.4.
+The root Dockerfile builds a non-root Linux server image with ffmpeg and a persistent `/data` directory. The web repository owns the two-service Compose stack and [deployment guide](../bardic-web/docs/DEPLOYMENT.md), including host ownership, private HTTPS, backups and restores. Run one server per local data directory. SIGTERM and SIGINT drain active HTTP handlers, sample flights and chapter checkpoints before releasing its lock; slow writes can delay shutdown. Compose allows five minutes before forcefully stopping the process. The API contract is 0.5.4.
 
 `docker build --target verify .` runs formatting, Clippy and the complete offline test suite, including contract and shutdown-signal tests. The web repository's Spark updater uses this gate before building and promoting a paired release from both `main` branches. Live provider tests remain ignored. Runtime images keep tests and build tools out of the final image.
 

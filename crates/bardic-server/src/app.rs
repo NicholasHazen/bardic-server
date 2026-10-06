@@ -767,26 +767,158 @@ pub async fn spawn(config: Config, clock: Arc<dyn Clock>) -> Result<Running, Sta
 }
 
 impl Running {
+    /// Signal shutdown, then drain HTTP handlers, sample flights and worker checkpoints
+    /// before releasing the data-folder lock. Durable writes must never outlive this instance.
     pub async fn stop(mut self) {
-        let _ = self.state.shutdown.send(true);
+        // The worker may still be recovering its Store before it subscribes. Persist the flag
+        // even with no current receivers so an immediate stop cannot lose its shutdown signal.
+        self.state.shutdown.send_replace(true);
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
         // Detached sample workers must settle spending and finish their file
         // commits before this instance releases the data-folder lock.
         self.state.samples.shutdown().await;
-        // Streams end on the flag; the timeout is a backstop for stuck connections.
-        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.handle)
+        // Streams observe the flag. Axum owns separate connection tasks, so aborting only
+        // its outer serve handle would leave their active handlers and Store writes alive.
+        let _ = self.handle.await;
+        // A provider is cancelled by the shutdown flag, but a request whose bytes arrived
+        // must finish its durable checkpoint. Aborting that stage cannot cancel blocking
+        // filesystem/database work and could release the folder lock while it still writes.
+        let _ = self.worker.await;
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use crate::clock::SystemClock;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn immediate_shutdown_persists_the_flag_before_any_worker_subscribes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = InstanceLock::acquire(dir.path()).unwrap();
+        let state = AppState::new(Config::for_data_dir(dir.path()), Arc::new(SystemClock)).unwrap();
+        assert_eq!(state.shutdown.receiver_count(), 0);
+        let late_state = state.clone();
+        let (subscribe_tx, subscribe_rx) = oneshot::channel();
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            subscribe_rx.await.unwrap();
+            let shutdown = late_state.shutdown.subscribe();
+            observed_tx.send(*shutdown.borrow()).unwrap();
+        });
+        let running = Running {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            state: state.clone(),
+            _lock: lock,
+            shutdown: None,
+            handle: tokio::spawn(async {}),
+            worker,
+        };
+        let stopping = running.stop();
+        tokio::pin!(stopping);
+        // Poll through the signal without allowing the controlled worker to subscribe first.
+        assert!(futures_util::poll!(stopping.as_mut()).is_pending());
+        assert_eq!(state.shutdown.receiver_count(), 0);
+        let signalled = *state.shutdown.borrow();
+        subscribe_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), stopping)
             .await
-            .is_err()
-        {
-            self.handle.abort();
-        }
-        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.worker)
+            .expect("an immediately stopped instance drains");
+        assert!(signalled, "shutdown must be saved without any receivers");
+        assert!(
+            observed_rx.await.unwrap(),
+            "a late worker sees shutdown immediately"
+        );
+        let _next_instance = InstanceLock::acquire(dir.path()).unwrap();
+    }
+
+    async fn slow_checkpoint_keeps_the_instance_lock(http: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = InstanceLock::acquire(dir.path()).unwrap();
+        let state = AppState::new(Config::for_data_dir(dir.path()), Arc::new(SystemClock)).unwrap();
+        let store = state.store.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (durable_tx, durable_rx) = oneshot::channel();
+        let checkpoint = tokio::spawn(async move {
+            store
+                .run(move |c| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    c.execute(
+                        "INSERT INTO meta(key,value) VALUES('synthetic_checkpoint','durable')",
+                        [],
+                    )?;
+                    durable_tx.send(()).unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let completed = tokio::spawn(async {});
+        let (handle, worker) = if http {
+            (checkpoint, completed)
+        } else {
+            (completed, checkpoint)
+        };
+        let running = Running {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            state: state.clone(),
+            _lock: lock,
+            shutdown: None,
+            handle,
+            worker,
+        };
+        let mut stopping = tokio::spawn(running.stop());
+        // Exceed the former three-second backstop while a real blocking Store write
+        // is pending. The test controls its release rather than assuming how fast I/O runs.
+        let stopped_early = tokio::time::timeout(Duration::from_millis(3100), &mut stopping)
             .await
-            .is_err()
-        {
-            self.worker.abort();
+            .is_ok();
+        let still_locked = matches!(InstanceLock::acquire(dir.path()), Err(LockError::InUse(_)));
+        // Always release the fixture before asserting, including against the old aborting code.
+        release_tx.send(()).unwrap();
+        durable_rx.await.unwrap();
+        if !stopped_early {
+            tokio::time::timeout(Duration::from_secs(3), stopping)
+                .await
+                .expect("shutdown drained the released checkpoint")
+                .unwrap();
         }
+        assert!(
+            !stopped_early,
+            "shutdown returned while its checkpoint still owned a write"
+        );
+        assert!(
+            still_locked,
+            "another instance acquired the folder before the write finished"
+        );
+        let checkpoint = state
+            .store
+            .run(|c| {
+                Ok(c.query_row(
+                    "SELECT value FROM meta WHERE key='synthetic_checkpoint'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(checkpoint, "durable");
+        let _next_instance = InstanceLock::acquire(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_the_instance_lock_until_a_slow_worker_checkpoint_finishes() {
+        slow_checkpoint_keeps_the_instance_lock(false).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_the_instance_lock_until_a_slow_http_handler_finishes() {
+        slow_checkpoint_keeps_the_instance_lock(true).await;
     }
 }
