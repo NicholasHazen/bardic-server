@@ -170,6 +170,231 @@ impl Fx {
             )
             .await
     }
+
+    async fn unicode() -> Self {
+        let s = TestServer::start_with(tempfile::tempdir().unwrap(), |c| {
+            c.audio_chunk_chars = 100;
+            c.job_retry_ms = 100;
+        })
+        .await;
+        let sentence =
+            "林🌿 and Café followed the brass bird across the quiet garden to the lantern.";
+        let text = (0..8)
+            .map(|i| format!("Path {i}: {sentence}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let book = s.add_book("Garden.txt", text.into_bytes()).await;
+        let b = FakeBreeze::start().await;
+        Self::on(s, b, Some(book)).await
+    }
+
+    async fn wait_generation(&self, id: &str, done: usize) -> Value {
+        for _ in 0..200 {
+            let j = self.job(id).await;
+            let g = &j["generation"];
+            if g.is_object() && g["requests_done"].as_u64().unwrap() >= done as u64 {
+                return j;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "job {id} did not report generation progress: {}",
+            self.job(id).await
+        );
+    }
+
+    async fn request_texts(&self, chunk_chars: i64) -> Vec<String> {
+        let text = self.chapter_text(0).await;
+        let chars: Vec<char> = text["text"].as_str().unwrap().chars().collect();
+        let lines: Vec<bardic_server::audio::Line> = text["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| bardic_server::audio::Line {
+                id: l["id"].as_str().unwrap().to_string(),
+                start: l["start"].as_i64().unwrap(),
+                end: l["end"].as_i64().unwrap(),
+            })
+            .collect();
+        bardic_server::audio::chunk_lines(&lines, chunk_chars)
+            .iter()
+            .map(|r| {
+                chars[lines[r.start].start as usize..lines[r.end - 1].end as usize]
+                    .iter()
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn generation_progress_counts_unicode_retained_requests_and_measures_only_active_time() {
+    let f = Fx::unicode().await;
+    let requests = f.request_texts(100).await;
+    assert!(requests.len() >= 4);
+    f.b.state.lock().unwrap().delay_ms = 300;
+    let j = f.request(0, json!({ "ahead": 0 }), 202).await;
+    let id = j["id"].as_str().unwrap();
+    let first = f.wait_generation(id, 0).await;
+    let g = &first["generation"];
+    assert_eq!(g["chapter_id"], f.chapters[0]);
+    assert_eq!(g["requests_done"], 0);
+    assert_eq!(g["requests_total"], requests.len());
+    assert_eq!(g["characters_done"], 0);
+    let total: usize = requests.iter().map(|t| t.chars().count()).sum();
+    assert_eq!(g["characters_total"], total);
+    assert!(g["chapter_seconds_remaining"].is_null());
+    assert!(g["job_seconds_remaining"].is_null());
+
+    let progress = f.wait_generation(id, 1).await;
+    let g = &progress["generation"];
+    let done = g["requests_done"].as_u64().unwrap() as usize;
+    assert_eq!(
+        g["characters_done"],
+        requests[..done]
+            .iter()
+            .map(|t| t.chars().count())
+            .sum::<usize>()
+    );
+    assert!(g["elapsed_seconds"].as_f64().unwrap() >= 0.25);
+    let estimate = g["chapter_seconds_remaining"].as_f64().unwrap();
+    assert!(estimate.is_finite() && estimate > 0.0);
+    assert_eq!(g["job_seconds_remaining"], g["chapter_seconds_remaining"]);
+    assert_eq!(
+        f.states().await[0].0,
+        "making",
+        "partial audio is not Ready"
+    );
+
+    let pause_path = format!("/api/jobs/{id}/pause");
+    let paused =
+        f.s.post("/api/jobs/{job_id}/pause", &pause_path, json!({}), 200)
+            .await;
+    assert!(paused["generation"]["chapter_seconds_remaining"].is_null());
+    assert!(paused["generation"]["job_seconds_remaining"].is_null());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let paused = f.job(id).await;
+    let elapsed = paused["generation"]["elapsed_seconds"].as_f64().unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        f.job(id).await["generation"]["elapsed_seconds"],
+        elapsed,
+        "paused time is excluded"
+    );
+
+    f.s.post(
+        "/api/jobs/{job_id}/resume",
+        &format!("/api/jobs/{id}/resume"),
+        json!({}),
+        200,
+    )
+    .await;
+    // The completed request is reused; the active attempt's clock starts again.
+    let resumed = f.wait_generation(id, 1).await;
+    assert!(resumed["generation"]["elapsed_seconds"].as_f64().unwrap() < elapsed);
+    f.b.state.lock().unwrap().delay_ms = 0;
+    let complete = f.wait(id, &["completed"]).await;
+    assert!(complete["generation"].is_null());
+    let spoken = f.b.spoken();
+    for text in &requests[..done] {
+        assert_eq!(
+            spoken.iter().filter(|t| *t == text).count(),
+            1,
+            "durably retained work is reused"
+        );
+    }
+    assert_eq!(
+        &spoken[spoken.len() - (requests.len() - done)..],
+        &requests[done..]
+    );
+    assert_eq!(f.states().await[0].0, "ready");
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn provider_wait_time_never_becomes_generation_throughput() {
+    let f = Fx::unicode().await;
+    {
+        let mut fake = f.b.state.lock().unwrap();
+        fake.delay_ms = 60;
+        fake.busy_left = 1;
+    }
+    let j = f.request(0, json!({ "ahead": 0 }), 202).await;
+    let id = j["id"].as_str().unwrap();
+    let waiting = f.wait(id, &["waiting"]).await;
+    let elapsed = waiting["generation"]["elapsed_seconds"].as_f64().unwrap();
+    assert!(elapsed > 0.0 && elapsed < 0.5);
+    assert!(waiting["generation"]["chapter_seconds_remaining"].is_null());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        f.job(id).await["generation"]["elapsed_seconds"],
+        elapsed,
+        "provider wait is excluded"
+    );
+    let progress = f.wait_generation(id, 1).await;
+    let g = &progress["generation"];
+    assert!(g["elapsed_seconds"].as_f64().unwrap() < 0.5);
+    let remain = g["requests_total"].as_u64().unwrap() - g["requests_done"].as_u64().unwrap();
+    assert!(
+        g["chapter_seconds_remaining"].as_f64().unwrap() < remain as f64 * 0.3,
+        "one-second provider wait must not inflate request throughput"
+    );
+    f.wait(id, &["completed"]).await;
+    f.s.stop().await;
+}
+
+#[tokio::test]
+async fn restarting_pins_saved_request_size_and_resets_the_active_attempt_timer() {
+    let f = Fx::unicode().await;
+    let requests = f.request_texts(100).await;
+    f.b.state.lock().unwrap().delay_ms = 300;
+    let j = f.request(0, json!({ "ahead": 0 }), 202).await;
+    let id = j["id"].as_str().unwrap().to_string();
+    let progress = f.wait_generation(&id, 1).await;
+    let retained = progress["generation"]["requests_done"].as_u64().unwrap();
+    let (b, audiobook, book, chapters) = (f.b, f.audiobook, f.book, f.chapters);
+    let dir = f.s.stop().await;
+    let conn = rusqlite::Connection::open(dir.path().join("bardic.db")).unwrap();
+    conn.execute("UPDATE jobs SET generation=json_set(generation,'$.request_started_at',0,'$.elapsed_seconds',1000) WHERE id=?1", [&id]).unwrap();
+    drop(conn);
+    let s = TestServer::start_with(dir, |c| {
+        c.audio_chunk_chars = 10_000;
+        c.job_retry_ms = 20;
+    })
+    .await;
+    let f = Fx {
+        s,
+        b,
+        book,
+        audiobook,
+        chapters,
+    };
+    let resumed = f.wait_generation(&id, retained as usize).await;
+    assert_eq!(
+        resumed["generation"]["requests_total"],
+        requests.len(),
+        "new default does not discard old request parts"
+    );
+    assert!(
+        resumed["generation"]["elapsed_seconds"].as_f64().unwrap() < 1.0,
+        "restart discards stale in-flight clock"
+    );
+    f.b.state.lock().unwrap().delay_ms = 0;
+    f.wait(&id, &["completed"]).await;
+    // FakeBreeze records a request only when it finishes. Let an interrupted
+    // handler finish before accounting for the one request that was in flight.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let spoken = f.b.spoken();
+    assert_eq!(&spoken[..retained as usize], &requests[..retained as usize]);
+    for text in &requests[..retained as usize] {
+        assert_eq!(
+            spoken.iter().filter(|t| *t == text).count(),
+            1,
+            "retained work was repeated"
+        );
+    }
+    assert_eq!(f.states().await[0].0, "ready");
+    f.s.stop().await;
 }
 
 #[tokio::test]

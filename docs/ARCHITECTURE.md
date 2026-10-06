@@ -74,7 +74,11 @@ A `VoiceSource` provides: `list_voices`, `sample`, `synthesize(chunk) -> audio +
 
 ## 6. Jobs and pacing
 
-A single scheduler owns the queue. Priorities: chapter requested by a listener now, then chapters ahead of a listener's place, then background make-ready. One job per audiobook chapter at a time; a second request joins it. Per-provider concurrency and rate pacing are configuration. Progress is emitted as change notices on the event stream.
+A single scheduler owns the queue. Priorities: chapter requested by a listener now, then chapters ahead of a listener's place, then background make-ready. One job per audiobook chapter at a time; a second request joins it. The current worker serializes requests across providers; independent provider concurrency and rate pacing remain follow-ups. Progress is emitted as change notices on the event stream.
+
+`jobs.generation` stores current-chapter request/Unicode progress and successful request timing samples from the same job. Request parts advance progress only after PCM is synced and the `chapter_parts` recovery row commits; complete request progress still waits for final file durability before Ready. Individual provider calls are timed so retries and quota waits never become generation throughput. In-flight clocks reset on restart, while measured samples and valid parts remain reusable. Saved chapter parts pin their original chunk size when the default is tuned, avoiding repeated paid work.
+
+Remaining-job estimates scan indexed line metadata for queued chapters, without loading their text or audio. Null-ETA states skip this scan. A release loopback check with synthetic metadata measured a typical 24-chapter/24,000-line shape at roughly 3 ms per job read and a very large 400-chapter/400,000-line shape at roughly 44–46 ms; the scan holds the shared store lock, so unusually large books or frequent progress reads can increase read latency. With the null-ETA guard, paused/waiting/unsampled reads of the large shape took under 0.3 ms. Retained parts in other queued chapters are not subtracted until those chapters become current, so the overall ETA can conservatively overestimate remaining work.
 
 ## 7. Prices
 

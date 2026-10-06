@@ -19,9 +19,13 @@ use crate::{
     },
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::{watch, Notify};
 
 /// Wakes the worker when there is work, and tells in-flight requests when a job's state changed.
@@ -59,9 +63,169 @@ fn parse_detail(s: Option<String>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Stored separately from Ready: only retained request parts advance these counts.
+/// Timing samples belong to one job/voice and survive a chapter boundary or restart.
+#[derive(Default, Deserialize, Serialize)]
+struct Generation {
+    chapter_id: String,
+    requests_done: usize,
+    requests_total: usize,
+    characters_done: i64,
+    characters_total: i64,
+    elapsed_seconds: f64,
+    sample_characters: i64,
+    sample_seconds: f64,
+    request_started_at: Option<f64>,
+    chunk_chars: i64,
+}
+
+fn wall_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+fn generation_row(conn: &Connection, job_id: &str) -> Result<Option<Generation>, ApiError> {
+    let value: Option<String> =
+        conn.query_row("SELECT generation FROM jobs WHERE id=?1", [job_id], |r| {
+            r.get(0)
+        })?;
+    Ok(value.and_then(|v| serde_json::from_str(&v).ok()))
+}
+
+fn save_generation(conn: &Connection, job_id: &str, g: &Generation) -> Result<(), ApiError> {
+    conn.execute(
+        "UPDATE jobs SET generation=?2 WHERE id=?1",
+        params![
+            job_id,
+            serde_json::to_string(g).expect("finite generation timings")
+        ],
+    )?;
+    Ok(())
+}
+
+fn chunk_characters(lines: &[Line], chunks: &[std::ops::Range<usize>]) -> Vec<i64> {
+    chunks
+        .iter()
+        .map(|r| lines[r.end - 1].end - lines[r.start].start)
+        .collect()
+}
+
+fn remaining_characters(conn: &Connection, job_id: &str, g: &Generation) -> Result<i64, ApiError> {
+    let chapters = conn
+        .prepare(
+            "SELECT i.chapter_id FROM job_items i JOIN jobs j ON j.id=i.job_id
+             WHERE i.job_id=?1 AND i.state='queued' AND i.chapter_id<>?2
+             AND NOT EXISTS (SELECT 1 FROM audio a WHERE a.audiobook_id=j.audiobook_id AND a.chapter_id=i.chapter_id AND a.deleted_at IS NULL)",
+        )?
+        .query_map(params![job_id, g.chapter_id], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut total = g.characters_total.saturating_sub(g.characters_done);
+    for chapter in chapters {
+        let lines = conn
+            .prepare("SELECT id,start,end FROM lines WHERE chapter_id=?1 ORDER BY idx")?
+            .query_map([chapter], |r| {
+                Ok(Line {
+                    id: r.get(0)?,
+                    start: r.get(1)?,
+                    end: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let chunks = audio::chunk_lines(&lines, g.chunk_chars.max(1));
+        total = total.saturating_add(chunk_characters(&lines, &chunks).iter().sum::<i64>());
+    }
+    Ok(total)
+}
+
+fn generation_value(conn: &Connection, job: &Value) -> Result<Value, ApiError> {
+    let id = job["id"].as_str().unwrap_or_default();
+    let Some(g) = generation_row(conn, id)? else {
+        return Ok(Value::Null);
+    };
+    if job["kind"] != "make_audio"
+        || job["state"] == "queued"
+        || job["current_chapter_id"] != g.chapter_id
+    {
+        return Ok(Value::Null);
+    }
+    let can_estimate = job["state"] == "running"
+        && g.sample_characters > 0
+        && g.sample_seconds.is_finite()
+        && g.sample_seconds > 0.0;
+    let estimate = |chars: i64| {
+        if !can_estimate {
+            return None;
+        }
+        let seconds = chars.max(0) as f64 * g.sample_seconds / g.sample_characters as f64;
+        seconds.is_finite().then_some(seconds)
+    };
+    let active_seconds = g
+        .request_started_at
+        .map_or(0.0, |at| (wall_seconds() - at).max(0.0));
+    // Null estimates need no scan of the queued chapter line metadata. Besides
+    // polling, listJobs can read several paused/waiting jobs under one lock.
+    let job_seconds_remaining = if can_estimate {
+        estimate(remaining_characters(conn, id, &g)?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "chapter_id": g.chapter_id,
+        "requests_done": g.requests_done.min(g.requests_total),
+        "requests_total": g.requests_total,
+        "characters_done": g.characters_done.clamp(0, g.characters_total.max(0)),
+        "characters_total": g.characters_total.max(0),
+        "elapsed_seconds": (g.elapsed_seconds + active_seconds).max(0.0),
+        "chapter_seconds_remaining": estimate(g.characters_total.saturating_sub(g.characters_done)),
+        "job_seconds_remaining": job_seconds_remaining,
+    }))
+}
+
+async fn generation_request<T>(
+    state: &AppState,
+    job_id: &str,
+    chapter_id: &str,
+    paid: bool,
+    fut: impl Future<Output = T>,
+) -> Option<(T, f64)> {
+    let (id, chapter, started) = (job_id.to_string(), chapter_id.to_string(), wall_seconds());
+    let _ = state
+        .store
+        .run(move |conn| {
+            if let Some(mut g) = generation_row(conn, &id)? {
+                if g.chapter_id == chapter {
+                    g.request_started_at = Some(started);
+                    save_generation(conn, &id, &g)?;
+                }
+            }
+            Ok(())
+        })
+        .await;
+    let began = Instant::now();
+    let result = interruptible(state, job_id, paid, fut).await;
+    let seconds = began.elapsed().as_secs_f64();
+    let (id, chapter) = (job_id.to_string(), chapter_id.to_string());
+    let _ = state
+        .store
+        .run(move |conn| {
+            if let Some(mut g) = generation_row(conn, &id)? {
+                if g.chapter_id == chapter {
+                    g.elapsed_seconds += seconds;
+                    g.request_started_at = None;
+                    save_generation(conn, &id, &g)?;
+                }
+            }
+            Ok(())
+        })
+        .await;
+    result.map(|v| (v, seconds))
+}
+
 /// The contract's `Job`.
 pub fn job_value(conn: &Connection, id: &str) -> Result<Value, ApiError> {
-    conn.query_row(
+    let mut job = conn.query_row(
         "SELECT id,kind,state,audiobook_id,book_id,plan_id,chapters_total,chapters_done,current_chapter_id,waiting,needs_you,started_by,created_at,updated_at FROM jobs WHERE id=?1",
         [id],
         |r| {
@@ -85,7 +249,9 @@ pub fn job_value(conn: &Connection, id: &str) -> Result<Value, ApiError> {
         },
     )
     .optional()?
-    .ok_or_else(|| ApiError::not_found("job_not_found", "No job has this id."))
+    .ok_or_else(|| ApiError::not_found("job_not_found", "No job has this id."))?;
+    job["generation"] = generation_value(conn, &job)?;
+    Ok(job)
 }
 
 pub fn announce(state: &AppState, job_id: &str) {
@@ -251,17 +417,29 @@ enum Stop {
 
 /// Try a request, waiting and retrying when the server is unreachable or busy.
 /// `f` returns Unreachable only when nothing was sent, so retrying is always free.
-async fn attempt<T, F, Fut>(state: &AppState, job_id: &str, paid: bool, mut f: F) -> Result<T, Stop>
+async fn attempt<T, F, Fut>(
+    state: &AppState,
+    job_id: &str,
+    chapter_id: Option<&str>,
+    paid: bool,
+    mut f: F,
+) -> Result<(T, f64), Stop>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, Fail>>,
 {
     const TRIES: u32 = 3;
     for n in 0..=TRIES {
-        match interruptible(state, job_id, paid, f()).await {
+        let result = match chapter_id {
+            Some(chapter) => generation_request(state, job_id, chapter, paid, f()).await,
+            None => interruptible(state, job_id, paid, f())
+                .await
+                .map(|v| (v, 0.0)),
+        };
+        match result {
             None => return Err(Stop::Interrupted),
-            Some(Ok(v)) => return Ok(v),
-            Some(Err(Fail::Unreachable)) if n < TRIES => {
+            Some((Ok(v), seconds)) => return Ok((v, seconds)),
+            Some((Err(Fail::Unreachable), _)) if n < TRIES => {
                 let wait = Duration::from_millis(state.config.job_retry_ms << n);
                 if interruptible(state, job_id, paid, tokio::time::sleep(wait))
                     .await
@@ -270,7 +448,7 @@ where
                     return Err(Stop::Interrupted);
                 }
             }
-            Some(Err(Fail::Busy(secs))) if n < TRIES => {
+            Some((Err(Fail::Busy(secs)), _)) if n < TRIES => {
                 let until =
                     crate::clock::ts(state.clock.now() + chrono::Duration::seconds(secs as i64));
                 let (id, at, d) = (
@@ -305,7 +483,7 @@ where
                     .await;
                 announce(state, job_id);
             }
-            Some(Err(e)) => return Err(Stop::Failed(e)),
+            Some((Err(e), _)) => return Err(Stop::Failed(e)),
         }
     }
     Err(Stop::Failed(Fail::Unreachable))
@@ -399,6 +577,14 @@ fn load_ctx(
         "UPDATE jobs SET current_chapter_id=?2 WHERE id=?1",
         params![job_id, chapter_id],
     )?;
+    // Preserve this job's successful throughput samples, but never expose the
+    // previous attempt's timer or a different chapter's progress while loading.
+    if let Some(mut g) = generation_row(conn, job_id)? {
+        g.chapter_id.clear();
+        g.elapsed_seconds = 0.0;
+        g.request_started_at = None;
+        save_generation(conn, job_id, &g)?;
+    }
     Ok(Some(Ctx {
         audiobook_id,
         book_id,
@@ -433,6 +619,7 @@ struct Made {
 /// Where a chapter's finished requests are kept, and how far it got.
 struct Parts {
     audio_id: String,
+    chunk_chars: i64,
     chunks_done: usize,
     pcm_bytes: usize,
     timings: Vec<Value>,
@@ -462,19 +649,28 @@ async fn load_parts(
             .await
             .map(|m| m.len())
             .ok();
-        if chars == state.config.audio_chunk_chars as i64 && len == Some(44 + bytes as u64) {
+        let chunks = audio::chunk_lines(&ctx.lines, chars.max(1));
+        if chars > 0
+            && done >= 0
+            && done as usize <= chunks.len()
+            && bytes >= 0
+            && len == Some(44 + bytes as u64)
+        {
             return Ok(Parts {
                 audio_id,
+                chunk_chars: chars,
                 chunks_done: done as usize,
                 pcm_bytes: bytes as usize,
                 timings: serde_json::from_str(&timings).unwrap_or_default(),
             });
         }
-        // The chunking changed or the file is gone: start the chapter again.
+        // A saved chapter pins its request size so tuning the default never
+        // discards paid work. Invalid recovery data or missing bytes starts over.
         let _ = tokio::fs::remove_file(dir.join(format!("{chapter_id}.part"))).await;
     }
     Ok(Parts {
         audio_id: state.new_id(),
+        chunk_chars: state.config.audio_chunk_chars as i64,
         chunks_done: 0,
         pcm_bytes: 0,
         timings: vec![],
@@ -492,7 +688,7 @@ async fn gemini_chunk(
     ctx: &Ctx,
     chapter_id: &str,
     text: &str,
-) -> Result<Vec<u8>, Stop> {
+) -> Result<(Vec<u8>, f64), Stop> {
     let key = ctx.api_key.clone().unwrap_or_default();
     let amount = plans::estimate(text.chars().count() as i64, ctx.price)
         .high
@@ -539,9 +735,10 @@ async fn gemini_chunk(
     };
     let base = state.config.gemini_url.clone();
     for n in 0..=3u32 {
-        let result = match interruptible(
+        let (result, seconds) = match generation_request(
             state,
             job_id,
+            chapter_id,
             true,
             gemini::speak(&base, &key, &ctx.voice, text),
         )
@@ -573,7 +770,7 @@ async fn gemini_chunk(
                         .await
                     }
                 }
-                Ok(speech.pcm)
+                Ok((speech.pcm, seconds))
             }
             Err(gemini::SpeakError::Unreachable) if n < 3 => {
                 let wait = Duration::from_millis(state.config.job_retry_ms << n);
@@ -638,7 +835,7 @@ async fn make_chapter(
     let breeze_base = ctx.base_url.as_deref().unwrap_or_default();
     let mut seed = 0;
     if ctx.source == "breeze" {
-        let (live, s) = attempt(state, job_id, false, || async {
+        let ((live, s), _) = attempt(state, job_id, None, false, || async {
             breeze::live_voice(breeze_base, key, &ctx.voice)
                 .await
                 .map_err(Fail::from)
@@ -651,10 +848,51 @@ async fn make_chapter(
     }
     let dir = state.store.data_dir().join("audio").join(&ctx.audiobook_id);
     tokio::fs::create_dir_all(&dir).await.map_err(fail_io)?;
-    let chunks = audio::chunk_lines(&ctx.lines, state.config.audio_chunk_chars as i64);
     let mut parts = load_parts(state, ctx, chapter_id, &dir)
         .await
         .map_err(|e| Stop::Failed(Fail::Failed(e.detail)))?;
+    let chunks = audio::chunk_lines(&ctx.lines, parts.chunk_chars);
+    let characters = chunk_characters(&ctx.lines, &chunks);
+    let (
+        id,
+        chapter,
+        requests_done,
+        requests_total,
+        characters_done,
+        characters_total,
+        chunk_chars,
+    ) = (
+        job_id.to_string(),
+        chapter_id.to_string(),
+        parts.chunks_done,
+        chunks.len(),
+        characters[..parts.chunks_done].iter().sum(),
+        characters.iter().sum(),
+        state.config.audio_chunk_chars as i64,
+    );
+    state
+        .store
+        .run(move |conn| {
+            let previous = generation_row(conn, &id)?.unwrap_or_default();
+            save_generation(
+                conn,
+                &id,
+                &Generation {
+                    chapter_id: chapter,
+                    requests_done,
+                    requests_total,
+                    characters_done,
+                    characters_total,
+                    sample_characters: previous.sample_characters,
+                    sample_seconds: previous.sample_seconds,
+                    chunk_chars,
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .map_err(|e| Stop::Failed(Fail::Failed(e.detail)))?;
+    announce(state, job_id);
     let tmp = dir.join(format!("{chapter_id}.part"));
 
     // A paid chapter is started only if the rest of it fits under the limits, so it is not
@@ -704,19 +942,17 @@ async fn make_chapter(
             [chunk_start as usize..lines.last().expect("non-empty chunk").end as usize]
             .iter()
             .collect();
-        let (pcm, segments) = if ctx.source == "gemini" {
-            (
-                gemini_chunk(state, job_id, ctx, chapter_id, &text).await?,
-                vec![],
-            )
+        let (pcm, segments, seconds) = if ctx.source == "gemini" {
+            let (pcm, seconds) = gemini_chunk(state, job_id, ctx, chapter_id, &text).await?;
+            (pcm, vec![], seconds)
         } else {
-            let s = attempt(state, job_id, false, || async {
+            let (s, seconds) = attempt(state, job_id, Some(chapter_id), false, || async {
                 breeze::speak(breeze_base, key, &ctx.voice, seed, &text)
                     .await
                     .map_err(Fail::from)
             })
             .await?;
-            (s.pcm, s.segments)
+            (s.pcm, s.segments, seconds)
         };
         let chunk_ms = audio::pcm_ms(pcm.len());
         let offset_ms = audio::pcm_ms(parts.pcm_bytes);
@@ -733,26 +969,41 @@ async fn make_chapter(
         file.sync_data().await.map_err(fail_io)?;
         parts.pcm_bytes += pcm.len();
         parts.chunks_done = i + 1;
-        let (a, c, id, n, done, bytes, t) = (
+        let (a, c, id, n, done, bytes, t, j, chars_done, chars_sample) = (
             ctx.audiobook_id.clone(),
             chapter_id.to_string(),
             parts.audio_id.clone(),
-            state.config.audio_chunk_chars as i64,
+            parts.chunk_chars,
             parts.chunks_done as i64,
             parts.pcm_bytes as i64,
             Value::Array(parts.timings.clone()).to_string(),
+            job_id.to_string(),
+            characters[..parts.chunks_done].iter().sum::<i64>(),
+            text.chars().count() as i64,
         );
         state
             .store
             .run(move |conn| {
-                conn.execute(
+                let tx = conn.unchecked_transaction()?;
+                tx.execute(
                     "INSERT OR REPLACE INTO chapter_parts(audiobook_id,chapter_id,audio_id,chunk_chars,chunks_done,pcm_bytes,timings) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                     params![a, c, id, n, done, bytes, t],
                 )?;
+                if let Some(mut g) = generation_row(&tx, &j)? {
+                    if g.chapter_id == c {
+                        g.requests_done = done as usize;
+                        g.characters_done = chars_done;
+                        g.sample_characters = g.sample_characters.saturating_add(chars_sample);
+                        g.sample_seconds += seconds;
+                        save_generation(&tx, &j, &g)?;
+                    }
+                }
+                tx.commit()?;
                 Ok(())
             })
             .await
             .map_err(|e| Stop::Failed(Fail::Failed(e.detail)))?;
+        announce(state, job_id);
     }
 
     file.seek(std::io::SeekFrom::Start(0))
@@ -865,6 +1116,7 @@ async fn process(state: &AppState, job_id: &str, chapter_id: &str) -> Result<(),
                         tx.execute("DELETE FROM chapter_parts WHERE audiobook_id=?1 AND chapter_id=?2", params![a, c])?;
                     }
                     tx.execute("UPDATE job_items SET state=?3, detail=?4 WHERE job_id=?1 AND chapter_id=?2", params![j, c, item_state, detail])?;
+                    tx.execute("UPDATE jobs SET current_chapter_id=NULL WHERE id=?1 AND current_chapter_id=?2", params![j, c])?;
                     recount(&tx, &j, &at)?;
                     tx.commit()?;
                     Ok(())
@@ -1011,6 +1263,9 @@ pub async fn run_worker(state: AppState) {
     let _ = state
         .store
         .run(|c| {
+            // No process-local request is still active after a restart. Leave
+            // throughput samples and durable chapter parts available to resume.
+            c.execute("UPDATE jobs SET generation=json_set(generation,'$.request_started_at',NULL) WHERE generation IS NOT NULL", [])?;
             c.execute("UPDATE jobs SET state='queued', current_chapter_id=NULL WHERE kind='make_audio' AND (state='running' OR (state='waiting' AND wake_at IS NULL))", [])?;
             spend::recover(c)?;
             // An export or backup that was running did not finish.
