@@ -18,6 +18,9 @@ pub struct Fake {
     pub spoken: Vec<String>,
     /// Count of every speech request received, answered or not.
     pub received: usize,
+    pub active: usize,
+    pub max_active: usize,
+    pub gate: Option<Arc<tokio::sync::Semaphore>>,
     pub delay_ms: u64,
     /// Answer the next speech requests with 429 and this retry-after (seconds).
     pub quota: Vec<u64>,
@@ -37,6 +40,14 @@ pub struct Fake {
 
 pub type Shared = Arc<Mutex<Fake>>;
 
+struct Active(Shared);
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().active -= 1;
+    }
+}
+
 fn key_ok(f: &Fake, h: &HeaderMap) -> bool {
     h.get("x-goog-api-key").and_then(|v| v.to_str().ok()) == Some(f.key.as_str())
 }
@@ -54,11 +65,17 @@ async fn models(State(f): State<Shared>, h: HeaderMap) -> Response {
 
 /// 10 ms of audio per character.
 async fn interactions(State(f): State<Shared>, h: HeaderMap, Json(body): Json<Value>) -> Response {
-    let (delay, valid) = {
+    let (delay, valid, gate) = {
         let mut f = f.lock().unwrap();
         f.received += 1;
-        (f.delay_ms, key_ok(&f, &h))
+        f.active += 1;
+        f.max_active = f.max_active.max(f.active);
+        (f.delay_ms, key_ok(&f, &h), f.gate.clone())
     };
+    let _active = Active(f.clone());
+    if let Some(gate) = gate {
+        gate.acquire_owned().await.unwrap().forget();
+    }
     if delay > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
     }

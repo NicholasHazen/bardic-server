@@ -54,6 +54,8 @@ pub const MAX_EVENT_STREAMS: usize = 64;
 
 pub struct Gates {
     pub imports: tokio::sync::Semaphore,
+    /// Shared by chapter requests and uncached free samples from the Breeze source.
+    pub breeze: tokio::sync::Semaphore,
     /// One ffmpeg at a time.
     pub exports: tokio::sync::Semaphore,
     pub streams: std::sync::atomic::AtomicUsize,
@@ -61,6 +63,15 @@ pub struct Gates {
 
 impl AppState {
     pub fn new(config: Config, clock: Arc<dyn Clock>) -> Result<Self, StoreError> {
+        // Tests and embedded callers can construct Config without Clap's range validation.
+        if !(1..=crate::config::MAX_BREEZE_CONCURRENCY).contains(&config.breeze_concurrency) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Breeze concurrency must be an integer from 1 to 16.",
+            )
+            .into());
+        }
+        let breeze_concurrency = config.breeze_concurrency;
         let store = Store::open(&config.data_dir)?;
         let default_name = config
             .server_name
@@ -104,6 +115,7 @@ impl AppState {
             samples: Arc::new(crate::samples::SampleFlights::default()),
             gates: Arc::new(Gates {
                 imports: tokio::sync::Semaphore::new(MAX_IMPORTS_AT_ONCE),
+                breeze: tokio::sync::Semaphore::new(breeze_concurrency),
                 exports: tokio::sync::Semaphore::new(1),
                 streams: std::sync::atomic::AtomicUsize::new(0),
             }),

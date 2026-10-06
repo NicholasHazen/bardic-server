@@ -1,6 +1,15 @@
 use clap::Parser;
 use std::{net::SocketAddr, path::PathBuf};
 
+pub const MAX_BREEZE_CONCURRENCY: usize = 16;
+
+fn parse_breeze_concurrency(raw: &str) -> Result<usize, String> {
+    raw.parse::<usize>()
+        .ok()
+        .filter(|value| (1..=MAX_BREEZE_CONCURRENCY).contains(value))
+        .ok_or_else(|| "Breeze concurrency must be an integer from 1 to 16.".to_string())
+}
+
 /// Server configuration. Flags win over environment variables.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "bardic-server", version, about = "Bardic server")]
@@ -45,6 +54,15 @@ pub struct Config {
     )]
     pub audio_chunk_chars: usize,
 
+    /// Most simultaneous Breeze speech requests, including free voice samples. Increase only when the source has capacity.
+    #[arg(
+        long,
+        env = "BARDIC_BREEZE_CONCURRENCY",
+        default_value_t = 1,
+        value_parser = parse_breeze_concurrency
+    )]
+    pub breeze_concurrency: usize,
+
     /// Where Gemini is reached. Only tests and proxies change this.
     #[arg(
         long,
@@ -73,9 +91,51 @@ impl Config {
             allow_hosts: Vec::new(),
             server_name: Some("Test Bardic".to_string()),
             audio_chunk_chars: 2500,
+            breeze_concurrency: 1,
             job_retry_ms: 2000,
             ffmpeg: "ffmpeg".to_string(),
             gemini_url: "http://127.0.0.1:1".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, FromArgMatches};
+
+    fn parse(args: &[&str]) -> Result<Config, clap::Error> {
+        // The default and flag tests must not depend on an operator's environment.
+        let matches = Config::command()
+            .mut_arg("breeze_concurrency", |arg| arg.env(None::<&str>))
+            .try_get_matches_from(args)?;
+        Config::from_arg_matches(&matches)
+    }
+
+    #[test]
+    fn breeze_concurrency_defaults_to_one_and_accepts_bounded_flags() {
+        assert_eq!(parse(&["bardic-server"]).unwrap().breeze_concurrency, 1);
+        assert_eq!(Config::for_data_dir("synthetic").breeze_concurrency, 1);
+        for value in ["1", "2", "16"] {
+            assert_eq!(
+                parse(&["bardic-server", "--breeze-concurrency", value])
+                    .unwrap()
+                    .breeze_concurrency,
+                value.parse::<usize>().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn breeze_concurrency_rejects_zero_excessive_and_non_integer_flags() {
+        for value in ["0", "17", "-1", "1.5", "many"] {
+            assert!(parse(&["bardic-server", "--breeze-concurrency", value]).is_err());
+        }
+        let command = Config::command();
+        let option = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "breeze_concurrency")
+            .unwrap();
+        assert_eq!(option.get_env().unwrap(), "BARDIC_BREEZE_CONCURRENCY");
     }
 }

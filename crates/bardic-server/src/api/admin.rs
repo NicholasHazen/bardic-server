@@ -237,8 +237,11 @@ fn link_tree(src: &FsPath, dst: &FsPath) -> std::io::Result<i64> {
         if entry.file_type()?.is_dir() {
             std::fs::create_dir_all(&to)?;
             total += link_tree(&from, &to)?;
-        } else if from.extension().is_some_and(|e| e == "part") {
-            continue; // a chapter still being made is not a finished file
+        } else if from
+            .extension()
+            .is_some_and(|e| e == "part" || e == "request")
+        {
+            continue; // the live backup keeps Ready media, not chapter recovery files
         } else {
             let len = entry.metadata()?.len() as i64;
             if std::fs::hard_link(&from, &to).is_err() {
@@ -328,7 +331,8 @@ async fn run_backup(state: AppState, id: String) {
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
             let c = rusqlite::Connection::open(copy)?;
             c.execute_batch(
-                "UPDATE voice_sources SET config = json_remove(config, '$.api_key'); VACUUM;",
+                "UPDATE voice_sources SET config = json_remove(config, '$.api_key');
+                 DELETE FROM chapter_requests; DELETE FROM chapter_parts; VACUUM;",
             )
         })
         .await

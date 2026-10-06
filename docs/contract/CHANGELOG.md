@@ -2,6 +2,11 @@
 
 Newest first. While the version is 0.x: additive changes bump the patch; breaking changes (a required field becoming nullable, removing or renaming anything, tightening validation) bump the minor and say what clients must change.
 
+## 0.5.4 (bounded free generation concurrency; compatible)
+- Operators can configure Breeze speech concurrency from 1 to 16, default 1. Uncached free samples and chapter requests share this limit. Premium generation remains sequential and inside existing plan gates.
+- Existing passage boundaries and chapter order are retained. Completed out-of-order free requests are durable and reusable after pause, retry or restart; Ready still requires complete ordered audio.
+- `Job.generation.elapsed_seconds` counts overlapping active requests once. Estimates use the union of successful request intervals, measuring observed throughput rather than assuming configured workers produce a linear speedup. The response shape is unchanged.
+
 ## 0.5.3 (audio generation progress; additive)
 - `Job.generation` is an optional nullable current-chapter object with durable request/Unicode character progress, active provider request elapsed time, and nullable measured chapter/job generation estimates. Existing job kinds return null.
 - Generation estimates use successful provider request times within the job, stay unknown before a sample exists, and are suppressed while waiting, paused or needing attention. Waiting time and retry delays do not become measured generation throughput.
