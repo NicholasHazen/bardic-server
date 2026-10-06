@@ -4,6 +4,7 @@
 pub mod api;
 pub mod app;
 pub mod audio;
+pub(crate) mod chapter_requests;
 pub mod clock;
 pub mod config;
 pub mod cover;
@@ -24,4 +25,4 @@ pub mod voices;
 
 /// Version of `docs/contract/openapi.yaml` this server implements. A test
 /// asserts it matches the contract file.
-pub const API_VERSION: &str = "0.5.3";
+pub const API_VERSION: &str = "0.5.4";

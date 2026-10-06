@@ -892,6 +892,17 @@ async fn make_sample(
     let base = cfg["base_url"].as_str().unwrap_or_default().to_string();
     let key = cfg["api_key"].as_str().map(str::to_string);
     let speak = async {
+        // Admission is shared with chapter work. Waiting stays inside the sample's total timeout,
+        // and dropping this future releases either its queued acquisition or its held permit.
+        let mut shutdown = state.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return Err(SpeakError::Unreachable);
+        }
+        let _permit = tokio::select! {
+            biased;
+            _ = shutdown.changed() => return Err(SpeakError::Unreachable),
+            permit = state.gates.breeze.acquire() => permit.map_err(|_| SpeakError::Unreachable)?,
+        };
         let (live, seed) = breeze::live_voice(&base, key.as_deref(), &voice.external).await?;
         if live != voice.revision {
             return Err(SpeakError::VoiceChanged);
@@ -900,6 +911,9 @@ async fn make_sample(
             .await
             .map_err(|_| SpeakError::VoiceChanged)?;
         check_sample_snapshot(&voice, &current).map_err(|_| SpeakError::VoiceChanged)?;
+        if *shutdown.borrow() {
+            return Err(SpeakError::Unreachable);
+        }
         breeze::speak(&base, key.as_deref(), &voice.external, seed, SAMPLE_TEXT).await
     };
     let speech = crate::samples::bounded_free_sample(std::time::Duration::from_secs(120), speak)

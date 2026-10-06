@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bardic server API
-  version: 0.5.3
+  version: 0.5.4
   summary: Contract between the Bardic server and its clients (draft).
   description: |
     Normative, language-neutral contract for Bardic v2. It is derived from
@@ -2725,7 +2725,7 @@ components:
         requests_total: {type: integer, minimum: 0}
         characters_done: {type: integer, minimum: 0, description: "Unicode code points in the durably retained requests."}
         characters_total: {type: integer, minimum: 0, description: "Unicode code points in the exact provider request text, including separators inside a request."}
-        elapsed_seconds: {type: number, minimum: 0, description: "Active provider request time during this chapter attempt. Retry delays, provider quota waits and pauses between attempts are excluded; resets when the chapter starts again."}
+        elapsed_seconds: {type: number, minimum: 0, description: "Wall time with at least one active provider request during this chapter attempt; overlapping requests count once. Local admission waits, retry delays with no other active request, provider quota waits and pauses between attempts are excluded; resets when the chapter starts again."}
         chapter_seconds_remaining: {type: [number, 'null'], minimum: 0, description: "Estimated generation time for remaining chapter text from measured successful-request throughput. Excludes unknown future waits and final file assembly."}
         job_seconds_remaining: {type: [number, 'null'], minimum: 0, description: "Estimated generation time for remaining selected text in this job from measured successful-request throughput. Excludes unknown future waits and final file assembly."}
     JobPage:

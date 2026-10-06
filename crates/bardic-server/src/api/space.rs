@@ -92,11 +92,15 @@ pub async fn free_space(
             tx.execute("UPDATE audio SET deleted_at=?2, path='' WHERE audiobook_id=?1 AND deleted_at IS NULL", params![aid, at])?;
             // Chapters half made are regenerable too, and half of a premium chapter is not worth keeping once its audiobook is emptied.
             let parts: Vec<String> = tx.prepare("SELECT chapter_id FROM chapter_parts WHERE audiobook_id=?1")?.query_map([&aid], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let request_paths: Vec<String> = tx.prepare("SELECT audio_id,request_index FROM chapter_requests WHERE audiobook_id=?1")?
+                .query_map([&aid], |r| Ok(crate::chapter_requests::relative_path(&aid, &r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))?
+                .collect::<Result<_, _>>()?;
             tx.execute("DELETE FROM chapter_parts WHERE audiobook_id=?1", [&aid])?;
             audit::record(&tx, &audit_id, &at, "audiobook.space_freed", &actor, &json!({ "audiobook_id": aid, "chapters": rows.len() }))?;
             tx.commit()?;
             let mut paths: Vec<String> = rows.iter().map(|(p, _)| p.clone()).collect();
             paths.extend(parts.into_iter().map(|ch| format!("audio/{aid}/{ch}.part")));
+            paths.extend(request_paths);
             Ok((rows.iter().map(|(_, b)| b).sum::<i64>(), b.book_id, paths))
         })
         .await?;
